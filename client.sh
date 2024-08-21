@@ -6,6 +6,8 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
+wget -N --no-check-certificate "https://raw.githubusercontent.com/xinling123/client/master/client" && chmod +x client
+
 UUID=$1
 SERVICE_NAME="myclient.service"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
