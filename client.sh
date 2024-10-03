@@ -6,9 +6,6 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
-# 下载或更新 client 文件
-wget -N --no-check-certificate "https://raw.githubusercontent.com/xinling123/client/master/client" && chmod +x client
-
 UUID=$1
 SERVICE_NAME="myclient.service"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
@@ -16,9 +13,15 @@ SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 # 检查服务是否已经存在并运行
 if systemctl is-active --quiet $SERVICE_NAME; then
     echo "$SERVICE_NAME 正在运行，只需重启服务..."
-    sudo systemctl restart $SERVICE_NAME
+    sudo systemctl stop $SERVICE_NAME
+    # 下载或更新 client 文件
+    wget -N --no-check-certificate "https://raw.githubusercontent.com/xinling123/client/master/client" && chmod +x client
+    sudo systemctl start $SERVICE_NAME
 else
     echo "创建 systemd 服务文件在 $SERVICE_PATH..."
+
+# 下载或更新 client 文件
+wget -N --no-check-certificate "https://raw.githubusercontent.com/xinling123/client/master/client" && chmod +x client
 
     # 创建 systemd 服务单元文件
     sudo bash -c "cat > $SERVICE_PATH" <<EOL
