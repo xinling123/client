@@ -1,5 +1,6 @@
 #!/bin/bash
 
+ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 # 检查是否提供了 UUID, SERVER 和 PORT
 if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
     echo "Usage: $0 <UUID> <SERVER> <PORT>"
