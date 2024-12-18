@@ -1,28 +1,28 @@
 #!/bin/bash
 
-ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-echo "设置时区为 Asia/Shanghai..."
+# ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+# echo "设置时区为 Asia/Shanghai..."
 
-# 检查是否安装 NTP 服务（使用 chrony 或 ntp）
-if ! command -v chronyd >/dev/null 2>&1 && ! command -v ntpd >/dev/null 2>&1; then
-    echo "未检测到 NTP 服务，安装 chrony..."
-    apt update && apt install -y chrony
-else
-    echo "NTP 服务已安装。"
-fi
+# # 检查是否安装 NTP 服务（使用 chrony 或 ntp）
+# if ! command -v chronyd >/dev/null 2>&1 && ! command -v ntpd >/dev/null 2>&1; then
+#     echo "未检测到 NTP 服务，安装 chrony..."
+#     apt update && apt install -y chrony
+# else
+#     echo "NTP 服务已安装。"
+# fi
 
-# 启用 NTP 时间同步
-echo "启用 NTP 时间同步..."
-timedatectl set-ntp true
+# # 启用 NTP 时间同步
+# echo "启用 NTP 时间同步..."
+# timedatectl set-ntp true
 
-# 检查 NTP 同步状态
-NTP_STATUS=$(timedatectl show --property=NTP | cut -d= -f2)
-if [[ "$NTP_STATUS" == "yes" ]]; then
-    echo "NTP 时间同步已启用。"
-else
-    echo "NTP 时间同步启用失败，请检查 NTP 配置。"
-    exit 1
-fi
+# # 检查 NTP 同步状态
+# NTP_STATUS=$(timedatectl show --property=NTP | cut -d= -f2)
+# if [[ "$NTP_STATUS" == "yes" ]]; then
+#     echo "NTP 时间同步已启用。"
+# else
+#     echo "NTP 时间同步启用失败，请检查 NTP 配置。"
+#     exit 1
+# fi
 
 # 检查是否提供了 UUID, SERVER 和 PORT
 if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
