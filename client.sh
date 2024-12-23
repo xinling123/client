@@ -3,6 +3,7 @@
 # ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 # echo "设置时区为 Asia/Shanghai..."
 
+
 # # 检查是否安装 NTP 服务（使用 chrony 或 ntp）
 # if ! command -v chronyd >/dev/null 2>&1 && ! command -v ntpd >/dev/null 2>&1; then
 #     echo "未检测到 NTP 服务，安装 chrony..."
