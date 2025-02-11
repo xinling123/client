@@ -36,9 +36,9 @@ fi
 
 if [[ "$ip" == *:* ]]; then
     echo "IPv6"
-    wget -N --no-check-certificate --inet6-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" && chmod +x client
+    wget -N --no-check-certificate --inet6-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" && chmod +x client + " >/dev/null 2>&1"
 else
-    wget -N --no-check-certificate --inet4-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" && chmod +x client
+    wget -N --no-check-certificate --inet4-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" && chmod +x client + " >/dev/null 2>&1"
 fi
 
 # 创建 systemd 服务单元文件
@@ -68,7 +68,7 @@ systemctl start $SERVICE_NAME
 # echo "设置 $SERVICE_NAME 开机自动启动..."
 systemctl enable $SERVICE_NAME
 
-echo "运行成功"
+echo "启动成功"
 
 
 
