@@ -36,9 +36,9 @@ fi
 
 if [[ "$ip" == *:* ]]; then
     echo "IPv6"
-    wget -N --no-check-certificate --inet6-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" + " >/dev/null 2>&1" && chmod +x client
+    wget -N --no-check-certificate --inet6-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" >/dev/null 2>&1 && chmod +x client
 else
-    wget -N --no-check-certificate --inet4-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" + " >/dev/null 2>&1" && chmod +x client
+    wget -N --no-check-certificate --inet4-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" >/dev/null 2>&1 && chmod +x client
 fi
 
 # 创建 systemd 服务单元文件
