@@ -590,7 +590,7 @@ def monitor_vps(uuid, priority, country_code, emoji, ipv4, ipv6, server, port, c
                 data = byte_str(s.recv(1024))
                 logger.info(data)
                 if data.find("Authentication required") > -1:
-                    json_string = '{"Authentication":"' + client_id + '"}'
+                    json_string = '{"Authentication":"' + client_id + '","vps_ip":"' + ipv4 + ',' + ipv6 + '"}'
                     s.send(byte_str(json_string))
                     data = byte_str(s.recv(1024))
                     if data.find("Authentication successful") < 0:
