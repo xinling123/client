@@ -266,6 +266,10 @@ def _ping_thread(mark):
         port = config.get('port', 0)
     logger.info(f"ping {host}:{port} (Mark: {mark})")
     while True:
+        with ping_config_lock:
+            config = ping_configs.get(mark, {})
+            host = config.get('host', '')
+            port = config.get('port', 0)
         # flush dns, every time.
         try:
             IP = host
