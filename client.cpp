@@ -19,6 +19,7 @@
 #include <ctime>
 #include <csignal>
 #include <cctype>
+#include <cmath>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -338,12 +339,12 @@ public:
         return {"", 0};
     }
     
-    vector<double> get_cpu_usage() {
-        vector<double> cpu_percentages;
+    vector<int> get_cpu_usage() {
+        vector<int> cpu_percentages;
         
         #ifdef _WIN32
         // Windows实现 - 简化版本
-        cpu_percentages.push_back(0.0);
+        cpu_percentages.push_back(0);
         return cpu_percentages;
         #else
         // Linux实现 - 读取/proc/stat来计算真实CPU使用率
@@ -352,7 +353,7 @@ public:
         
         ifstream stat_file("/proc/stat");
         if (!stat_file.is_open()) {
-            cpu_percentages.push_back(0.0);
+            cpu_percentages.push_back(0);
             return cpu_percentages;
         }
         
@@ -389,7 +390,7 @@ public:
             prev_cpu_times = curr_cpu_times;
             // 第一次调用返回0
             for (size_t i = 0; i < curr_cpu_times.size(); i++) {
-                cpu_percentages.push_back(0.0);
+                cpu_percentages.push_back(0);
             }
             return cpu_percentages;
         }
@@ -409,12 +410,13 @@ public:
             uint64_t total_diff = curr_total - prev_total;
             uint64_t idle_diff = curr_idle - prev_idle;
             
-            // 计算使用率
-            double usage = 0.0;
+            // 计算使用率并转换为整数
+            int usage = 0;
             if (total_diff > 0) {
-                usage = (double)(total_diff - idle_diff) / total_diff * 100.0;
-                if (usage < 0) usage = 0.0;
-                if (usage > 100.0) usage = 100.0;
+                double usage_double = (double)(total_diff - idle_diff) / total_diff * 100.0;
+                if (usage_double < 0) usage_double = 0.0;
+                if (usage_double > 100.0) usage_double = 100.0;
+                usage = static_cast<int>(round(usage_double)); // 四舍五入转换为整数
             }
             
             cpu_percentages.push_back(usage);
