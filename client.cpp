@@ -431,7 +431,7 @@ public:
         #else
         struct sysinfo info;
         sysinfo(&info);
-        return {info.totalswap * info.mem_unit, (info.freeswap) * info.mem_unit};
+        return {info.totalswap * info.mem_unit, (info.totalswap - info.freeswap) * info.mem_unit};
         #endif
     }
     
