@@ -12,6 +12,9 @@ LIBS = -lcurl
 # Linux特定设置
 ifeq ($(UNAME_S),Linux)
     LIBS += -lpthread
+    # 静态链接选项（用于跨系统兼容性）
+    STATIC_LIBS = -static-libgcc -static-libstdc++ -lcurl -lpthread
+    STATIC_CXXFLAGS = $(CXXFLAGS) -static
 endif
 
 # macOS特定设置
@@ -32,9 +35,54 @@ endif
 # 默认目标
 all: $(TARGET)
 
-# 编译目标
+# 编译目标（动态链接）
 $(TARGET): $(SOURCES)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $(TARGET) $(SOURCES) $(LIBS)
+
+# 静态链接目标（跨系统兼容）
+static: $(SOURCES)
+ifeq ($(UNAME_S),Linux)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static-libgcc -static-libstdc++ -o $(TARGET)_static $(SOURCES) $(LIBS)
+	@echo "静态链接版本已创建：$(TARGET)_static"
+	@echo "这个版本在大多数Linux系统上都能运行"
+else
+	@echo "静态链接目前只支持Linux系统"
+endif
+
+# 完全静态链接（包括系统库）
+full-static: $(SOURCES)
+ifeq ($(UNAME_S),Linux)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static -o $(TARGET)_full_static $(SOURCES) -lcurl -lpthread -lssl -lcrypto -lz -ldl
+	@echo "完全静态链接版本已创建：$(TARGET)_full_static"
+	@echo "这个版本应该在任何Linux系统上都能运行"
+else
+	@echo "完全静态链接目前只支持Linux系统"
+endif
+
+# 最小静态链接（避免复杂依赖）
+minimal-static: $(SOURCES)
+ifeq ($(UNAME_S),Linux)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static -o $(TARGET)_minimal_static $(SOURCES) \
+		-lcurl -lpthread -lssl -lcrypto -lz -ldl -lrt \
+		2>/dev/null || \
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static -o $(TARGET)_minimal_static $(SOURCES) \
+		-lcurl -lpthread -lssl -lcrypto -lz 2>/dev/null || \
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static-libgcc -static-libstdc++ -o $(TARGET)_minimal_static $(SOURCES) \
+		-lcurl -lpthread
+	@echo "最小静态链接版本已创建：$(TARGET)_minimal_static"
+	@echo "如果仍有问题，请尝试 make docker-build"
+else
+	@echo "最小静态链接目前只支持Linux系统"
+endif
+
+# Docker 编译（最兼容）
+docker-build: $(SOURCES)
+	@echo "使用 Docker 编译兼容版本..."
+	docker build -f Dockerfile.build -t client-builder . && \
+	mkdir -p output && \
+	docker run --rm -v $(shell pwd)/output:/output client-builder && \
+	cp output/client_static ./client_compatible || \
+	echo "Docker 编译失败，请确保 Docker 已安装并运行"
 
 # 安装依赖库的说明
 deps:
@@ -52,10 +100,13 @@ deps:
 	@echo "如果包管理器中没有nlohmann-json，请手动下载头文件："
 	@echo "wget https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp"
 	@echo "并将其放在 /usr/local/include/nlohmann/ 目录下"
+	@echo ""
+	@echo "对于静态链接，还需要安装静态库："
+	@echo "Ubuntu/Debian: sudo apt-get install libcurl4-openssl-dev libssl-dev zlib1g-dev"
 
 # 清理
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(TARGET)_static $(TARGET)_full_static $(TARGET)_minimal_static
 
 # 编译并运行测试程序
 test: test_build.cpp
@@ -76,4 +127,4 @@ install: $(TARGET)
 uninstall:
 	rm -f /usr/local/bin/$(TARGET)
 
-.PHONY: all clean deps test run install uninstall 
+.PHONY: all clean deps test run install uninstall static full-static minimal-static docker-build 
