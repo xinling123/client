@@ -473,9 +473,26 @@ public:
     }
     
     string get_uptime() {
+        #ifdef _WIN32
+        // Windows: 获取系统运行时间（毫秒）
+        ULONGLONG uptime_ms = GetTickCount64();
+        uint64_t uptime_seconds = uptime_ms / 1000;
+        #else
+        // Linux: 从/proc/uptime读取系统运行时间
+        ifstream uptime_file("/proc/uptime");
+        double uptime_seconds_double = 0.0;
+        if (uptime_file.is_open()) {
+            uptime_file >> uptime_seconds_double;
+            uptime_file.close();
+        }
+        uint64_t uptime_seconds = static_cast<uint64_t>(uptime_seconds_double);
+        #endif
+        
+        // 计算系统启动时间 = 当前时间 - 运行时间
         auto now = chrono::system_clock::now();
-        auto time_t = chrono::system_clock::to_time_t(now);
-        auto tm = *localtime(&time_t);
+        auto boot_time = now - chrono::seconds(uptime_seconds);
+        auto boot_time_t = chrono::system_clock::to_time_t(boot_time);
+        auto tm = *localtime(&boot_time_t);
         
         stringstream ss;
         ss << put_time(&tm, "%Y/%m/%d %H:%M:%S");
