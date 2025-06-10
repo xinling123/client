@@ -122,7 +122,7 @@ public:
         disk_io["read"] = 0;
         disk_io["write"] = 0;
         
-        log_file.open("server_watch.log", ios::app);
+        log_file.open("/root/server_watch.log", ios::app);
         
         #ifdef _WIN32
         WSADATA wsaData;
@@ -787,6 +787,8 @@ public:
     }
     
     void docker_thread() {
+        static map<string, DockerContainer> persistent_containers; // 持久化容器状态
+        
         while (running) {
             try {
                 lock_guard<mutex> lock(docker_lock);
@@ -801,11 +803,32 @@ public:
                 // 获取所有容器的基本信息
                 vector<DockerContainer> containers = get_docker_containers();
                 
-                // 获取每个容器的详细统计信息
+                // 合并新容器信息和历史状态
                 for (auto& container : containers) {
+                    // 如果容器已存在，保留其历史网络统计数据
+                    if (persistent_containers.find(container.name) != persistent_containers.end()) {
+                        DockerContainer& existing = persistent_containers[container.name];
+                        // 只有当已存在有效的历史数据时才复制
+                        auto time_since_epoch = existing.prev_time.time_since_epoch();
+                        if (time_since_epoch.count() > 0) {
+                            container.prev_rx_bytes = existing.prev_rx_bytes;
+                            container.prev_tx_bytes = existing.prev_tx_bytes;
+                            container.prev_time = existing.prev_time;
+                            container.rx_speed = existing.rx_speed;
+                            container.tx_speed = existing.tx_speed;
+                        }
+                    }
+                    
                     if (container.status == "running") {
                         get_container_stats(container);
+                    } else {
+                        // 停止的容器网速为0
+                        container.rx_speed = "0 B/s";
+                        container.tx_speed = "0 B/s";
                     }
+                    
+                    // 更新持久化状态
+                    persistent_containers[container.name] = container;
                     
                     // 转换为JSON格式存储
                     json container_json;
@@ -819,9 +842,21 @@ public:
                     docker_dict[container.name] = container_json;
                 }
                 
-                // if (!containers.empty()) {
-                //     log_info("Updated " + to_string(containers.size()) + " Docker containers");
-                // }
+                // 清理不存在的容器
+                for (auto it = persistent_containers.begin(); it != persistent_containers.end();) {
+                    bool found = false;
+                    for (const auto& container : containers) {
+                        if (container.name == it->first) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        it = persistent_containers.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
                 
             } catch (const exception& e) {
                 log_info("Docker monitoring failed: " + string(e.what()));
@@ -984,7 +1019,7 @@ public:
             // 网络IO格式通常是 "1.2kB / 2.3kB"（输入/输出）
             size_t slash_pos = net_io.find('/');
             if (slash_pos == string::npos) {
-                container.rx_speed = "0 B/s";
+                container.rx_speed = "0 B";
                 container.tx_speed = "0 B/s";
                 return;
             }
@@ -1000,28 +1035,47 @@ public:
             uint64_t tx_bytes = parse_size_string(tx_str);
             
             auto current_time = chrono::steady_clock::now();
-            auto time_diff = chrono::duration_cast<chrono::seconds>(current_time - container.prev_time).count();
             
-            if (time_diff > 0 && container.prev_rx_bytes > 0) {
-                uint64_t rx_speed = (rx_bytes > container.prev_rx_bytes) ? 
-                                  (rx_bytes - container.prev_rx_bytes) / time_diff : 0;
-                uint64_t tx_speed = (tx_bytes > container.prev_tx_bytes) ? 
-                                  (tx_bytes - container.prev_tx_bytes) / time_diff : 0;
-                
-                container.rx_speed = format_size(rx_speed) + "/s";
-                container.tx_speed = format_size(tx_speed) + "/s";
-            } else {
-                container.rx_speed = "0 B/s";
+            // 检查是否是第一次采样（使用时间点判断更可靠）
+            auto time_since_epoch = container.prev_time.time_since_epoch();
+            bool is_first_sample = (time_since_epoch.count() == 0);
+            
+            if (is_first_sample) {
+                container.prev_rx_bytes = rx_bytes;
+                container.prev_tx_bytes = tx_bytes;
+                container.prev_time = current_time;
+                container.rx_speed = "0 B";
                 container.tx_speed = "0 B/s";
+                return;
             }
-            
-            container.prev_rx_bytes = rx_bytes;
-            container.prev_tx_bytes = tx_bytes;
-            container.prev_time = current_time;
+            auto time_diff = chrono::duration_cast<chrono::seconds>(current_time - container.prev_time).count();
+            // 确保时间间隔合理（至少1秒）
+            if (time_diff >= 1) {
+                uint64_t rx_speed = 0;
+                uint64_t tx_speed = 0;
+                
+                // 计算速度（字节/秒）
+                if (rx_bytes >= container.prev_rx_bytes) {
+                    rx_speed = (rx_bytes - container.prev_rx_bytes) / time_diff;
+                }
+                if (tx_bytes >= container.prev_tx_bytes) {
+                    tx_speed = (tx_bytes - container.prev_tx_bytes) / time_diff;
+                }
+                
+                container.rx_speed = format_size(rx_speed);
+                container.tx_speed = format_size(tx_speed) + "/s";
+                // 更新历史数据
+                container.prev_rx_bytes = rx_bytes;
+                container.prev_tx_bytes = tx_bytes;
+                container.prev_time = current_time;
+            } else {
+                log_info("Container " + container.name + ": Time interval too short, keeping previous speed");
+            }
             
         } catch (const exception& e) {
             container.rx_speed = "null";
             container.tx_speed = "null";
+            log_info("Container " + container.name + ": Parse error - " + string(e.what()));
         }
     }
     
