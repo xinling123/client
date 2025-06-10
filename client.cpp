@@ -340,8 +340,91 @@ public:
     
     vector<double> get_cpu_usage() {
         vector<double> cpu_percentages;
-        cpu_percentages.push_back(50.0);
+        
+        #ifdef _WIN32
+        // Windows实现 - 简化版本
+        cpu_percentages.push_back(0.0);
         return cpu_percentages;
+        #else
+        // Linux实现 - 读取/proc/stat来计算真实CPU使用率
+        static vector<vector<uint64_t>> prev_cpu_times;
+        vector<vector<uint64_t>> curr_cpu_times;
+        
+        ifstream stat_file("/proc/stat");
+        if (!stat_file.is_open()) {
+            cpu_percentages.push_back(0.0);
+            return cpu_percentages;
+        }
+        
+        string line;
+        int cpu_index = -1;
+        
+        while (getline(stat_file, line)) {
+            if (line.substr(0, 3) == "cpu") {
+                if (line.length() > 4 && isdigit(line[3])) {
+                    // 单个CPU核心 (cpu0, cpu1, ...)
+                    cpu_index++;
+                } else if (line.substr(0, 4) == "cpu ") {
+                    // 总CPU (cpu )
+                    continue; // 跳过总CPU，我们计算各个核心的
+                } else {
+                    continue;
+                }
+                
+                // 解析CPU时间
+                stringstream ss(line);
+                string cpu_name;
+                uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+                
+                ss >> cpu_name >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
+                
+                vector<uint64_t> times = {user, nice, system, idle, iowait, irq, softirq, steal};
+                curr_cpu_times.push_back(times);
+            }
+        }
+        stat_file.close();
+        
+        // 如果是第一次调用，初始化prev_cpu_times
+        if (prev_cpu_times.empty()) {
+            prev_cpu_times = curr_cpu_times;
+            // 第一次调用返回0
+            for (size_t i = 0; i < curr_cpu_times.size(); i++) {
+                cpu_percentages.push_back(0.0);
+            }
+            return cpu_percentages;
+        }
+        
+        // 计算每个CPU核心的使用率
+        for (size_t i = 0; i < curr_cpu_times.size() && i < prev_cpu_times.size(); i++) {
+            // 计算总时间差
+            uint64_t prev_idle = prev_cpu_times[i][3] + prev_cpu_times[i][4]; // idle + iowait
+            uint64_t curr_idle = curr_cpu_times[i][3] + curr_cpu_times[i][4];
+            
+            uint64_t prev_total = 0, curr_total = 0;
+            for (int j = 0; j < 8; j++) {
+                prev_total += prev_cpu_times[i][j];
+                curr_total += curr_cpu_times[i][j];
+            }
+            
+            uint64_t total_diff = curr_total - prev_total;
+            uint64_t idle_diff = curr_idle - prev_idle;
+            
+            // 计算使用率
+            double usage = 0.0;
+            if (total_diff > 0) {
+                usage = (double)(total_diff - idle_diff) / total_diff * 100.0;
+                if (usage < 0) usage = 0.0;
+                if (usage > 100.0) usage = 100.0;
+            }
+            
+            cpu_percentages.push_back(usage);
+        }
+        
+        // 更新prev_cpu_times
+        prev_cpu_times = curr_cpu_times;
+        
+        return cpu_percentages;
+        #endif
     }
     
     vector<double> get_load_average() {
