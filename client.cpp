@@ -261,8 +261,44 @@ public:
                 string ip_info = http_get(ip_info_url);
                 if (!ip_info.empty()) {
                     json js = json::parse(ip_info);
+
+                    log_info("IP info: " + ip_info);
                     country_code = js.value("country_code", "");
-                    emoji = js.value("flag", "");
+                    log_info("Country code: " + country_code);
+                    
+                    // 将flag对象转成字符串保存到emoji
+                    try {
+                        // 手动提取flag字段的JSON字符串
+                        size_t flag_start = ip_info.find("\"flag\":");
+                        if (flag_start != string::npos) {
+                            // 找到flag字段后面的{
+                            size_t brace_start = ip_info.find("{", flag_start);
+                            if (brace_start != string::npos) {
+                                // 找到匹配的}
+                                int brace_count = 1;
+                                size_t pos = brace_start + 1;
+                                while (pos < ip_info.length() && brace_count > 0) {
+                                    if (ip_info[pos] == '{') {
+                                        brace_count++;
+                                    } else if (ip_info[pos] == '}') {
+                                        brace_count--;
+                                    }
+                                    pos++;
+                                }
+                                if (brace_count == 0) {
+                                    emoji = ip_info.substr(brace_start, pos - brace_start);
+                                    log_info("Flag JSON: " + emoji);
+                                }
+                            }
+                        }
+                        
+                        if (emoji.empty()) {
+                            emoji = "{}";
+                        }
+                    } catch (const exception& e) {
+                        emoji = "{}";
+                        log_info("Failed to extract flag JSON: " + string(e.what()));
+                    }
                 }
             }
         } catch (...) {
@@ -385,7 +421,7 @@ public:
         #else
         struct sysinfo info;
         sysinfo(&info);
-        return {info.totalram * info.mem_unit, (info.totalram - info.freeram) * info.mem_unit};
+        return {info.totalram * info.mem_unit, (info.freeram) * info.mem_unit};
         #endif
     }
     
@@ -395,7 +431,7 @@ public:
         #else
         struct sysinfo info;
         sysinfo(&info);
-        return {info.totalswap * info.mem_unit, (info.totalswap - info.freeswap) * info.mem_unit};
+        return {info.totalswap * info.mem_unit, (info.freeswap) * info.mem_unit};
         #endif
     }
     
@@ -1043,7 +1079,7 @@ public:
                     data["client_id"] = client_id;
                     data["priority"] = priority;
                     data["country_code"] = country_code;
-                    data["emoji"] = emoji;
+                    data["emoji"] = json::parse(emoji);
                     data["ipv4"] = ipv4;
                     data["ipv6"] = ipv6;
                     
