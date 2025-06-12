@@ -885,7 +885,6 @@ public:
         if (!mark.empty() && !host.empty() && port > 0 && !name.empty()) {
             lock_guard<mutex> lock(ping_config_lock);
             ping_configs[mark] = {host, port, name};
-            log_info("Updated " + mark + ": " + host + ":" + to_string(port) + " " + name);
         }
     }
     
@@ -1159,12 +1158,21 @@ public:
                         auth_data["vps_ip"] = ipv4 + "," + ipv6;
                         
                         string auth_str = auth_data.dump();
-                        send(sock, auth_str.c_str(), auth_str.length(), 0);
+                        log_info("DEBUG: Sending auth data: " + auth_str);
+                        
+                        int auth_sent = send(sock, auth_str.c_str(), auth_str.length(), 0);
+                        if (auth_sent < 0) {
+                            log_info("DEBUG: Failed to send auth data");
+                            close(sock);
+                            this_thread::sleep_for(chrono::seconds(30));
+                            continue;
+                        }
                         
                         bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
                         if (bytes_received > 0) {
                             buffer[bytes_received] = '\0';
                             string auth_response(buffer);
+                            log_info("DEBUG: Auth response: " + auth_response);
                             if (auth_response.find("Authentication successful") == string::npos) {
                                 log_info("Authentication failed: " + auth_response);
                                 close(sock);
@@ -1175,8 +1183,15 @@ public:
                     }
                 }
                 
+                log_info("DEBUG: Sending 'get arg' command");
                 string get_arg = "get arg";
-                send(sock, get_arg.c_str(), get_arg.length(), 0);
+                int get_arg_sent = send(sock, get_arg.c_str(), get_arg.length(), 0);
+                if (get_arg_sent < 0) {
+                    log_info("DEBUG: Failed to send 'get arg' command");
+                    close(sock);
+                    this_thread::sleep_for(chrono::seconds(30));
+                    continue;
+                }
                 
                 bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (bytes_received > 0) {
@@ -1185,8 +1200,15 @@ public:
                     log_info("Arg response: " + arg_response);
                     
                     if (arg_response.find("arg") != string::npos) {
+                        log_info("DEBUG: Sending 'arg succ' response");
                         string arg_succ = "arg succ";
-                        send(sock, arg_succ.c_str(), arg_succ.length(), 0);
+                        int arg_succ_sent = send(sock, arg_succ.c_str(), arg_succ.length(), 0);
+                        if (arg_succ_sent < 0) {
+                            log_info("DEBUG: Failed to send 'arg succ' response");
+                            close(sock);
+                            this_thread::sleep_for(chrono::seconds(30));
+                            continue;
+                        }
                         
                         try {
                             // 使用简化的字段解析函数解析初始配置
@@ -1226,133 +1248,209 @@ public:
                         }
                     }
                 }
-                
                 while (running) {
-                    json data;
-                    
-                    data["version"] = "2.0.0";
-                    data["uuid"] = uuid;
-                    data["client_id"] = client_id;
-                    data["priority"] = priority;
-                    data["country_code"] = country_code;
-                    data["emoji"] = json::parse(emoji);
-                    data["ipv4"] = ipv4;
-                    data["ipv6"] = ipv6;
-                    
-                    data["server_uptime"] = get_uptime();
-                    data["system_version"] = get_system_version();
-                    data["cpu_model"] = get_cpu_model();
-                    data["cpu_usage"] = get_cpu_usage();
-                    
-                    auto [disk_total, disk_used] = get_disk();
-                    data["disk_total_size"] = format_size(disk_total);
-                    data["disk_used_size"] = format_size(disk_used);
-                    
-                    auto [memory_total, memory_used] = get_memory();
-                    data["memory_total_size"] = format_size(memory_total);
-                    data["memory_used_size"] = format_size(memory_used);
-                    
-                    auto [swap_total, swap_used] = get_swap();
-                    data["swap_total_size"] = format_size(swap_total);
-                    data["swap_used_size"] = format_size(swap_used);
-                    
-                    auto [network_in, network_out] = get_network();
-                    data["network_upload_size"] = format_size(network_out);
-                    data["network_download_size"] = format_size(network_in);
-                    
-                    data["network_rx"] = format_size(static_cast<uint64_t>(net_speed["netrx"]));
-                    data["network_tx"] = format_size(static_cast<uint64_t>(net_speed["nettx"]));
-                    
-                    auto load_avg = get_load_average();
-                    stringstream load_ss;
-                    load_ss << fixed << setprecision(2) << load_avg[0] << "," << load_avg[1] << "," << load_avg[2];
-                    data["load_averages"] = load_ss.str();
-                    
-                    auto [tcp, udp, process, thread] = get_tupd();
-                    data["tcp"] = tcp;
-                    data["udp"] = udp;
-                    data["process"] = process;
-                    data["thread"] = thread;
-                    
-                    data["io_read"] = format_size(disk_io["read"]);
-                    data["io_write"] = format_size(disk_io["write"]);
-                    
-                    {
-                        lock_guard<mutex> lock(docker_lock);
-                        data["dockers"] = docker_dict;
-                    }
-                    
-                    {
-                        lock_guard<mutex> lock(ping_config_lock);
-                        data["name_10010"] = ping_configs["10010"].name;
-                        data["name_189"] = ping_configs["189"].name;
-                        data["name_10086"] = ping_configs["10086"].name;
-                    }
-                    
-                    data["ping_10010"] = lost_rates["10010"] * 100;
-                    data["ping_189"] = lost_rates["189"] * 100;
-                    data["ping_10086"] = lost_rates["10086"] * 100;
-                    data["time_10010"] = ping_times["10010"];
-                    data["time_189"] = ping_times["189"];
-                    data["time_10086"] = ping_times["10086"];
-                    
-                    string json_str = "update:" + data.dump() + "`";
-                    send(sock, json_str.c_str(), json_str.length(), 0);
-                    
-                    this_thread::sleep_for(chrono::seconds(1));
-                    
-                    fd_set readfds;
-                    FD_ZERO(&readfds);
-                    FD_SET(sock, &readfds);
-                    
-                    struct timeval timeout;
-                    timeout.tv_sec = 0;
-                    timeout.tv_usec = 100000;
-                    
-                    int activity = select(sock + 1, &readfds, nullptr, nullptr, &timeout);
-                    if (activity > 0 && FD_ISSET(sock, &readfds)) {
-                        bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
-                        if (bytes_received > 0) {
-                            buffer[bytes_received] = '\0';
-                            string server_data(buffer);
-                            log_info("Received from server: " + server_data);
-                            
-                            if (server_data.find("arg") != string::npos && server_data.find("update_ping") != string::npos) {
-                                try {
-                                    // 使用简化的字段解析函数
-                                    string cu_ip = parse_json_field(server_data, "cu_ip");
-                                    string cu_port_str = parse_json_field(server_data, "cu_port");
-                                    string cu_name = decode_unicode_escapes(parse_json_field(server_data, "cu_name"));
-                                    
-                                    string ct_ip = parse_json_field(server_data, "ct_ip");
-                                    string ct_port_str = parse_json_field(server_data, "ct_port");
-                                    string ct_name = decode_unicode_escapes(parse_json_field(server_data, "ct_name"));
-                                    
-                                    string cm_ip = parse_json_field(server_data, "cm_ip");
-                                    string cm_port_str = parse_json_field(server_data, "cm_port");
-                                    string cm_name = decode_unicode_escapes(parse_json_field(server_data, "cm_name"));
-                                    
-                                    // 更新所有ping目标
-                                    if (!cu_ip.empty() && !cu_port_str.empty()) {
-                                        update_ping_target("10010", cu_ip, stoi(cu_port_str), cu_name);
-                                        log_info("Updated ping target CU: " + cu_name + " (" + cu_ip + ":" + cu_port_str + ")");
-                                    }
-                                    if (!ct_ip.empty() && !ct_port_str.empty()) {
-                                        update_ping_target("189", ct_ip, stoi(ct_port_str), ct_name);
-                                        log_info("Updated ping target CT: " + ct_name + " (" + ct_ip + ":" + ct_port_str + ")");
-                                    }
-                                    if (!cm_ip.empty() && !cm_port_str.empty()) {
-                                        update_ping_target("10086", cm_ip, stoi(cm_port_str), cm_name);
-                                        log_info("Updated ping target CM: " + cm_name + " (" + cm_ip + ":" + cm_port_str + ")");
-                                    }
-                                } catch (const exception& e) {
-                                    log_info("Failed to parse update request: " + string(e.what()));
-                                }
+                    try {
+                        json data;
+                        
+                        data["version"] = "2.0.0";
+                        data["uuid"] = uuid;
+                        data["client_id"] = client_id;
+                        data["priority"] = priority;
+                        data["country_code"] = country_code;
+                        
+                        // 修复emoji JSON解析错误
+                        try {
+                            if (!emoji.empty() && emoji != "\"\"" && emoji.find("{") != string::npos) {
+                                data["emoji"] = json::parse(emoji);
+                            } else {
+                                data["emoji"] = json::object(); // 使用空JSON对象
                             }
-                        } else if (bytes_received == 0) {
-                            log_info("Server closed connection");
+                        } catch (const exception& e) {
+                            log_info("Failed to parse emoji JSON, using empty object: " + string(e.what()));
+                            data["emoji"] = json::object(); // 使用空JSON对象
+                        }
+                        data["ipv4"] = ipv4;
+                        data["ipv6"] = ipv6;
+                        try {
+                            data["server_uptime"] = get_uptime();
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get uptime: " + string(e.what()));
+                            data["server_uptime"] = "0";
+                        }
+                        
+                        try {
+                            data["system_version"] = get_system_version();
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get system version: " + string(e.what()));
+                            data["system_version"] = "Unknown";
+                        }
+                        
+                        try {
+                            data["cpu_model"] = get_cpu_model();
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get CPU model: " + string(e.what()));
+                            data["cpu_model"] = "Unknown";
+                        }
+                        
+                        try {
+                            data["cpu_usage"] = get_cpu_usage();
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get CPU usage: " + string(e.what()));
+                            data["cpu_usage"] = vector<int>{0};
+                        }
+                        
+                        try {
+                            auto [disk_total, disk_used] = get_disk();
+                            data["disk_total_size"] = format_size(disk_total);
+                            data["disk_used_size"] = format_size(disk_used);
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get disk info: " + string(e.what()));
+                            data["disk_total_size"] = "0B";
+                            data["disk_used_size"] = "0B";
+                        }
+                        
+                        try {
+                            auto [memory_total, memory_used] = get_memory();
+                            data["memory_total_size"] = format_size(memory_total);
+                            data["memory_used_size"] = format_size(memory_used);
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get memory info: " + string(e.what()));
+                            data["memory_total_size"] = "0B";
+                            data["memory_used_size"] = "0B";
+                        }
+                        
+                        try {
+                            auto [swap_total, swap_used] = get_swap();
+                            data["swap_total_size"] = format_size(swap_total);
+                            data["swap_used_size"] = format_size(swap_used);
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get swap info: " + string(e.what()));
+                            data["swap_total_size"] = "0B";
+                            data["swap_used_size"] = "0B";
+                        }
+                        
+                        try {
+                            auto [network_in, network_out] = get_network();
+                            data["network_upload_size"] = format_size(network_out);
+                            data["network_download_size"] = format_size(network_in);
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get network stats: " + string(e.what()));
+                            data["network_upload_size"] = "0B";
+                            data["network_download_size"] = "0B";
+                        }
+                        
+                        data["network_rx"] = format_size(static_cast<uint64_t>(net_speed["netrx"]));
+                        data["network_tx"] = format_size(static_cast<uint64_t>(net_speed["nettx"]));
+                        
+                        try {
+                            auto load_avg = get_load_average();
+                            stringstream load_ss;
+                            load_ss << fixed << setprecision(2) << load_avg[0] << "," << load_avg[1] << "," << load_avg[2];
+                            data["load_averages"] = load_ss.str();
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get load averages: " + string(e.what()));
+                            data["load_averages"] = "0.00,0.00,0.00";
+                        }
+                        
+                        try {
+                            auto [tcp, udp, process, thread] = get_tupd();
+                            data["tcp"] = tcp;
+                            data["udp"] = udp;
+                            data["process"] = process;
+                            data["thread"] = thread;
+                        } catch (const exception& e) {
+                            log_info("DEBUG: Failed to get connection counts: " + string(e.what()));
+                            data["tcp"] = 0;
+                            data["udp"] = 0;
+                            data["process"] = 0;
+                            data["thread"] = 0;
+                        }
+                        
+                        data["io_read"] = format_size(disk_io["read"]);
+                        data["io_write"] = format_size(disk_io["write"]);
+                        
+                        {
+                            lock_guard<mutex> lock(docker_lock);
+                            data["dockers"] = docker_dict;
+                        }
+                        
+                        {
+                            lock_guard<mutex> lock(ping_config_lock);
+                            data["name_10010"] = ping_configs["10010"].name;
+                            data["name_189"] = ping_configs["189"].name;
+                            data["name_10086"] = ping_configs["10086"].name;
+                        }
+                        
+                        data["ping_10010"] = lost_rates["10010"] * 100;
+                        data["ping_189"] = lost_rates["189"] * 100;
+                        data["ping_10086"] = lost_rates["10086"] * 100;
+                        data["time_10010"] = ping_times["10010"];
+                        data["time_189"] = ping_times["189"];
+                        data["time_10086"] = ping_times["10086"];
+                        
+                        string json_str = "update:" + data.dump() + "`";
+                        int sent_bytes = send(sock, json_str.c_str(), json_str.length(), 0);
+                        if (sent_bytes < 0) {
+                            log_info("DEBUG: Failed to send data packet, error: " + to_string(errno));
                             break;
                         }
+                        
+                        this_thread::sleep_for(chrono::seconds(1));
+                        
+                        fd_set readfds;
+                        FD_ZERO(&readfds);
+                        FD_SET(sock, &readfds);
+                        
+                        struct timeval timeout;
+                        timeout.tv_sec = 0;
+                        timeout.tv_usec = 100000;
+                        
+                        int activity = select(sock + 1, &readfds, nullptr, nullptr, &timeout);
+                        if (activity > 0 && FD_ISSET(sock, &readfds)) {
+                            bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+                            if (bytes_received > 0) {
+                                buffer[bytes_received] = '\0';
+                                string server_data(buffer);
+                                
+                                if (server_data.find("arg") != string::npos && server_data.find("update_ping") != string::npos) {
+                                    try {
+                                        // 使用简化的字段解析函数
+                                        string cu_ip = parse_json_field(server_data, "cu_ip");
+                                        string cu_port_str = parse_json_field(server_data, "cu_port");
+                                        string cu_name = decode_unicode_escapes(parse_json_field(server_data, "cu_name"));
+                                        
+                                        string ct_ip = parse_json_field(server_data, "ct_ip");
+                                        string ct_port_str = parse_json_field(server_data, "ct_port");
+                                        string ct_name = decode_unicode_escapes(parse_json_field(server_data, "ct_name"));
+                                        
+                                        string cm_ip = parse_json_field(server_data, "cm_ip");
+                                        string cm_port_str = parse_json_field(server_data, "cm_port");
+                                        string cm_name = decode_unicode_escapes(parse_json_field(server_data, "cm_name"));
+                                        
+                                        // 更新所有ping目标
+                                        if (!cu_ip.empty() && !cu_port_str.empty()) {
+                                            update_ping_target("10010", cu_ip, stoi(cu_port_str), cu_name);
+                                            log_info("Updated ping target CU: " + cu_name + " (" + cu_ip + ":" + cu_port_str + ")");
+                                        }
+                                        if (!ct_ip.empty() && !ct_port_str.empty()) {
+                                            update_ping_target("189", ct_ip, stoi(ct_port_str), ct_name);
+                                            log_info("Updated ping target CT: " + ct_name + " (" + ct_ip + ":" + ct_port_str + ")");
+                                        }
+                                        if (!cm_ip.empty() && !cm_port_str.empty()) {
+                                            update_ping_target("10086", cm_ip, stoi(cm_port_str), cm_name);
+                                            log_info("Updated ping target CM: " + cm_name + " (" + cm_ip + ":" + cm_port_str + ")");
+                                        }
+                                    } catch (const exception& e) {
+                                        log_info("Failed to parse update request: " + string(e.what()));
+                                    }
+                                }
+                            } else if (bytes_received == 0) {
+                                log_info("Server closed connection");
+                                break;
+                            }
+                        }
+                    } catch (const exception& e) {
+                        log_info("Exception in monitor_vps: " + string(e.what()));
                     }
                 }
                 
