@@ -59,31 +59,6 @@ else
 	@echo "完全静态链接目前只支持Linux系统"
 endif
 
-# 最小静态链接（避免复杂依赖）
-minimal-static: $(SOURCES)
-ifeq ($(UNAME_S),Linux)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static -o $(TARGET)_minimal_static $(SOURCES) \
-		-lcurl -lpthread -lssl -lcrypto -lz -ldl -lrt \
-		2>/dev/null || \
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static -o $(TARGET)_minimal_static $(SOURCES) \
-		-lcurl -lpthread -lssl -lcrypto -lz 2>/dev/null || \
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static-libgcc -static-libstdc++ -o $(TARGET)_minimal_static $(SOURCES) \
-		-lcurl -lpthread
-	@echo "最小静态链接版本已创建：$(TARGET)_minimal_static"
-	@echo "如果仍有问题，请尝试 make docker-build"
-else
-	@echo "最小静态链接目前只支持Linux系统"
-endif
-
-# Docker 编译（最兼容）
-docker-build: $(SOURCES)
-	@echo "使用 Docker 编译兼容版本..."
-	docker build -f Dockerfile.build -t client-builder . && \
-	mkdir -p output && \
-	docker run --rm -v $(shell pwd)/output:/output client-builder && \
-	cp output/client_static ./client_compatible || \
-	echo "Docker 编译失败，请确保 Docker 已安装并运行"
-
 # 安装依赖库的说明
 deps:
 	@echo "请确保已安装以下依赖库："
@@ -106,7 +81,7 @@ deps:
 
 # 清理
 clean:
-	rm -f $(TARGET) $(TARGET)_static $(TARGET)_full_static $(TARGET)_minimal_static
+	rm -f $(TARGET) $(TARGET)_static $(TARGET)_full_static
 
 # 编译并运行测试程序
 test: test_build.cpp
@@ -127,4 +102,4 @@ install: $(TARGET)
 uninstall:
 	rm -f /usr/local/bin/$(TARGET)
 
-.PHONY: all clean deps test run install uninstall static full-static minimal-static docker-build 
+.PHONY: all clean deps test run install uninstall static full-static 

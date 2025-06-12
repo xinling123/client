@@ -36,6 +36,7 @@
     #include <sys/stat.h>
     #include <sys/statvfs.h>
     #include <netinet/in.h>
+    #include <netinet/tcp.h>
     #include <arpa/inet.h>
     #include <netdb.h>
     #include <unistd.h>
@@ -267,34 +268,14 @@ public:
                     country_code = js.value("country_code", "");
                     log_info("Country code: " + country_code);
                     
-                    // 将flag对象转成字符串保存到emoji
+                    // 直接从解析后的JSON对象中提取flag字段，与Python版本保持一致
                     try {
-                        // 手动提取flag字段的JSON字符串
-                        size_t flag_start = ip_info.find("\"flag\":");
-                        if (flag_start != string::npos) {
-                            // 找到flag字段后面的{
-                            size_t brace_start = ip_info.find("{", flag_start);
-                            if (brace_start != string::npos) {
-                                // 找到匹配的}
-                                int brace_count = 1;
-                                size_t pos = brace_start + 1;
-                                while (pos < ip_info.length() && brace_count > 0) {
-                                    if (ip_info[pos] == '{') {
-                                        brace_count++;
-                                    } else if (ip_info[pos] == '}') {
-                                        brace_count--;
-                                    }
-                                    pos++;
-                                }
-                                if (brace_count == 0) {
-                                    emoji = ip_info.substr(brace_start, pos - brace_start);
-                                    log_info("Flag JSON: " + emoji);
-                                }
-                            }
-                        }
-                        
-                        if (emoji.empty()) {
+                        if (js.find("flag") != js.end() && !js["flag"].is_null()) {
+                            emoji = js["flag"].dump(); // 将flag对象转换为JSON字符串
+                            log_info("Flag JSON: " + emoji);
+                        } else {
                             emoji = "{}";
+                            log_info("No flag field found, using empty object");
                         }
                     } catch (const exception& e) {
                         emoji = "{}";
@@ -867,8 +848,8 @@ public:
     }
     
     void start_realtime_data() {
-        for (const auto& [mark, config] : ping_configs) {
-            thread t(&ServerMonitor::ping_thread, this, mark);
+        for (const auto& pair : ping_configs) {
+            thread t(&ServerMonitor::ping_thread, this, pair.first);
             t.detach();
         }
         
@@ -885,6 +866,7 @@ public:
         if (!mark.empty() && !host.empty() && port > 0 && !name.empty()) {
             lock_guard<mutex> lock(ping_config_lock);
             ping_configs[mark] = {host, port, name};
+            log_info("Updated " + mark + ": " + host + ":" + to_string(port) + " " + name);
         }
     }
     
@@ -1145,12 +1127,25 @@ public:
                     continue;
                 }
                 
+                // 优化socket缓冲区和选项设置以提高大包传输可靠性
+                int send_buffer_size = 65536;  // 64KB发送缓冲区
+                int recv_buffer_size = 32768;  // 32KB接收缓冲区
+                setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size));
+                setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size, sizeof(recv_buffer_size));
+                
+                // 启用TCP_NODELAY以减少延迟
+                int flag = 1;
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
+                
+                // 启用保活机制
+                int keepalive = 1;
+                setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+                
                 char buffer[1024];
                 int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (bytes_received > 0) {
                     buffer[bytes_received] = '\0';
                     string response(buffer);
-                    log_info("Server response: " + response);
                     
                     if (response.find("Authentication required") != string::npos) {
                         json auth_data;
@@ -1158,21 +1153,12 @@ public:
                         auth_data["vps_ip"] = ipv4 + "," + ipv6;
                         
                         string auth_str = auth_data.dump();
-                        log_info("DEBUG: Sending auth data: " + auth_str);
-                        
-                        int auth_sent = send(sock, auth_str.c_str(), auth_str.length(), 0);
-                        if (auth_sent < 0) {
-                            log_info("DEBUG: Failed to send auth data");
-                            close(sock);
-                            this_thread::sleep_for(chrono::seconds(30));
-                            continue;
-                        }
+                        send(sock, auth_str.c_str(), auth_str.length(), 0);
                         
                         bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
                         if (bytes_received > 0) {
                             buffer[bytes_received] = '\0';
                             string auth_response(buffer);
-                            log_info("DEBUG: Auth response: " + auth_response);
                             if (auth_response.find("Authentication successful") == string::npos) {
                                 log_info("Authentication failed: " + auth_response);
                                 close(sock);
@@ -1183,32 +1169,17 @@ public:
                     }
                 }
                 
-                log_info("DEBUG: Sending 'get arg' command");
                 string get_arg = "get arg";
-                int get_arg_sent = send(sock, get_arg.c_str(), get_arg.length(), 0);
-                if (get_arg_sent < 0) {
-                    log_info("DEBUG: Failed to send 'get arg' command");
-                    close(sock);
-                    this_thread::sleep_for(chrono::seconds(30));
-                    continue;
-                }
+                send(sock, get_arg.c_str(), get_arg.length(), 0);
                 
                 bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (bytes_received > 0) {
                     buffer[bytes_received] = '\0';
                     string arg_response(buffer);
-                    log_info("Arg response: " + arg_response);
                     
                     if (arg_response.find("arg") != string::npos) {
-                        log_info("DEBUG: Sending 'arg succ' response");
                         string arg_succ = "arg succ";
-                        int arg_succ_sent = send(sock, arg_succ.c_str(), arg_succ.length(), 0);
-                        if (arg_succ_sent < 0) {
-                            log_info("DEBUG: Failed to send 'arg succ' response");
-                            close(sock);
-                            this_thread::sleep_for(chrono::seconds(30));
-                            continue;
-                        }
+                        send(sock, arg_succ.c_str(), arg_succ.length(), 0);
                         
                         try {
                             // 使用简化的字段解析函数解析初始配置
@@ -1248,6 +1219,7 @@ public:
                         }
                     }
                 }
+                
                 while (running) {
                     try {
                         json data;
@@ -1258,19 +1230,22 @@ public:
                         data["priority"] = priority;
                         data["country_code"] = country_code;
                         
-                        // 修复emoji JSON解析错误
+                        // 修复emoji JSON解析错误 - 直接使用JSON字符串
                         try {
-                            if (!emoji.empty() && emoji != "\"\"" && emoji.find("{") != string::npos) {
+                            if (!emoji.empty() && emoji != "\"\"" && emoji != "{}") {
                                 data["emoji"] = json::parse(emoji);
                             } else {
                                 data["emoji"] = json::object(); // 使用空JSON对象
+                                log_info("DEBUG: Using empty emoji object (emoji=" + emoji + ")");
                             }
                         } catch (const exception& e) {
                             log_info("Failed to parse emoji JSON, using empty object: " + string(e.what()));
                             data["emoji"] = json::object(); // 使用空JSON对象
                         }
+                        
                         data["ipv4"] = ipv4;
                         data["ipv6"] = ipv6;
+
                         try {
                             data["server_uptime"] = get_uptime();
                         } catch (const exception& e) {
@@ -1389,9 +1364,67 @@ public:
                         data["time_10086"] = ping_times["10086"];
                         
                         string json_str = "update:" + data.dump() + "`";
-                        int sent_bytes = send(sock, json_str.c_str(), json_str.length(), 0);
-                        if (sent_bytes < 0) {
-                            log_info("DEBUG: Failed to send data packet, error: " + to_string(errno));
+                        // 可靠发送数据包 - 增强版本
+                        size_t total_sent = 0;
+                        size_t data_length = json_str.length();
+                        const char* data_ptr = json_str.c_str();
+                        int retry_count = 0;
+                        const int max_retries = 3;
+                        bool send_success = false;
+                        
+                        while (retry_count < max_retries && !send_success) {
+                            total_sent = 0;
+                            bool current_attempt_success = true;
+                            while (total_sent < data_length && current_attempt_success) {
+                                // 设置发送超时
+                                struct timeval tv;
+                                tv.tv_sec = 5;  // 5秒超时
+                                tv.tv_usec = 0;
+                                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+                                
+                                // 分块发送，每次最多发送4096字节
+                                size_t chunk_size = min((size_t)4096, data_length - total_sent);
+                                int sent_bytes = send(sock, data_ptr + total_sent, chunk_size, 0);
+                                
+                                if (sent_bytes < 0) {
+                                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                        this_thread::sleep_for(chrono::milliseconds(10));
+                                        continue;
+                                    } else {
+                                        log_info("DEBUG: Failed to send data packet, error: " + to_string(errno) + " (" + strerror(errno) + ")");
+                                        current_attempt_success = false;
+                                        break;
+                                    }
+                                } else if (sent_bytes == 0) {
+                                    current_attempt_success = false;
+                                    break;
+                                } else {
+                                    total_sent += sent_bytes;
+                                    
+                                    // 添加小延迟以避免网络拥塞
+                                    if (total_sent < data_length) {
+                                        this_thread::sleep_for(chrono::microseconds(100));
+                                    }
+                                }
+                            }
+                            
+                            if (current_attempt_success && total_sent == data_length) {
+                                send_success = true;
+                                
+                                // 确保数据真正发送到网络
+                                int flag = 1;
+                                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
+                                
+                            } else {
+                                retry_count++;
+                                if (retry_count < max_retries) {
+                                    this_thread::sleep_for(chrono::milliseconds(100));
+                                }
+                            }
+                        }
+                        
+                        if (!send_success) {
+                            log_info("DEBUG: Failed to send complete data packet after " + to_string(max_retries) + " attempts");
                             break;
                         }
                         
@@ -1411,6 +1444,7 @@ public:
                             if (bytes_received > 0) {
                                 buffer[bytes_received] = '\0';
                                 string server_data(buffer);
+                                log_info("Received from server: " + server_data);
                                 
                                 if (server_data.find("arg") != string::npos && server_data.find("update_ping") != string::npos) {
                                     try {
@@ -1514,7 +1548,7 @@ public:
 
 ServerMonitor* global_monitor = nullptr;
 
-void signal_handler(int signal) {
+void signal_handler(int /* signal */) {
     cout << "\nReceived interrupt signal, shutting down..." << endl;
     if (global_monitor) {
         global_monitor->stop();
