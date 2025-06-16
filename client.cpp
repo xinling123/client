@@ -231,8 +231,16 @@ public:
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
             curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             
-            curl_easy_perform(curl);
+            CURLcode res = curl_easy_perform(curl);
+            if (res != CURLE_OK) {
+                log_info("HTTP GET failed for " + url + ": " + string(curl_easy_strerror(res)));
+            } else {
+                long response_code = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+            }
             curl_easy_cleanup(curl);
+        } else {
+            log_info("Failed to initialize curl for " + url);
         }
         
         return response;
@@ -251,8 +259,16 @@ public:
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
             curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             
-            curl_easy_perform(curl);
+            CURLcode res = curl_easy_perform(curl);
+            if (res != CURLE_OK) {
+                log_info("HTTP POST failed for " + url + ": " + string(curl_easy_strerror(res)));
+            } else {
+                long response_code = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+            }
             curl_easy_cleanup(curl);
+        } else {
+            log_info("Failed to initialize curl for " + url);
         }
         
         return response;
@@ -260,17 +276,14 @@ public:
     
     void get_client_ip() {
         try {
-            priority = http_post("https://test.ipw.cn");
+            priority = http_post("test.ipw.cn");
             if (!priority.empty()) {
-                string ip_info_url = "http://ipwho.is/" + priority;
+                string ip_info_url = "ipwho.is/" + priority;
                 string ip_info = http_get(ip_info_url);
                 if (!ip_info.empty()) {
                     json js = json::parse(ip_info);
 
-                    log_info("IP info: " + ip_info);
                     country_code = js.value("country_code", "");
-                    log_info("Country code: " + country_code);
-                    
                     // 直接从解析后的JSON对象中提取flag字段，与Python版本保持一致
                     try {
                         if (js.find("flag") != js.end() && !js["flag"].is_null()) {
@@ -293,14 +306,28 @@ public:
         }
         
         try {
-            ipv4 = http_get("https://4.ipw.cn/");
+            ipv4 = http_get("4.ipw.cn");
+            if (ipv4.empty()) {
+                log_info("WARNING: IPv4 response is empty");
+            }
+        } catch (const exception& e) {
+            log_info("Failed to get IPv4 address: " + string(e.what()));
+            ipv4 = "";
         } catch (...) {
+            log_info("Failed to get IPv4 address: Unknown exception");
             ipv4 = "";
         }
         
         try {
-            ipv6 = http_get("https://6.ipw.cn/");
+            ipv6 = http_get("6.ipw.cn");
+            if (ipv6.empty()) {
+                log_info("WARNING: IPv6 response is empty");
+            }
+        } catch (const exception& e) {
+            log_info("Failed to get IPv6 address: " + string(e.what()));
+            ipv6 = "";
         } catch (...) {
+            log_info("Failed to get IPv6 address: Unknown exception");
             ipv6 = "";
         }
         
