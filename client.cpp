@@ -67,6 +67,8 @@ private:
     string uuid, client_id, url;
     string server_ip;
     int server_port;
+    string last_successful_server_ip;  // 保存上次成功的服务器IP
+    int last_successful_server_port;   // 保存上次成功的服务器端口
     string ipv4, ipv6, priority, country_code, emoji;
     
     struct PingConfig {
@@ -104,7 +106,8 @@ private:
     
 public:
     ServerMonitor(const string& uuid, const string& client_id, const string& url)
-        : uuid(uuid), client_id(client_id), url(url) {
+        : uuid(uuid), client_id(client_id), url(url), server_port(0), 
+          last_successful_server_port(0) {
         
         ping_configs["10010"] = {"cu.tz.cloudcpp.com", 80, ""};
         ping_configs["189"] = {"ct.tz.cloudcpp.com", 80, ""};
@@ -304,20 +307,54 @@ public:
         log_info("Client IP info: " + priority + ", " + country_code + ", " + emoji + ", " + ipv4 + ", " + ipv6);
     }
     
-    pair<string, int> get_server_ip() {
-        try {
-            string response = http_get(url);
-            json js = json::parse(response);
-            
-            string server_ipv4 = js[0];
-            int port = js[2];
-            
-            return {server_ipv4, port};
-        } catch (...) {
-            log_info("Failed to get server IP");
+    pair<string, int> get_server_ip_with_retry(int max_retries = 5, int delay_seconds = 10) {
+        for (int attempt = 1; attempt <= max_retries; attempt++) {
+            try {
+                log_info("Attempting to get server IP (attempt " + to_string(attempt) + "/" + to_string(max_retries) + ")");
+                string response = http_get(url);
+                
+                if (response.empty()) {
+                    log_info("Empty response from server, attempt " + to_string(attempt) + " failed");
+                    if (attempt < max_retries) {
+                        log_info("Waiting " + to_string(delay_seconds) + " seconds before retry...");
+                        this_thread::sleep_for(chrono::seconds(delay_seconds));
+                        continue;
+                    }
+                } else {
+                    json js = json::parse(response);
+                    
+                    string server_ipv4 = js[0];
+                    int port = js[2];
+                    
+                    // 保存成功获取的IP和端口
+                    last_successful_server_ip = server_ipv4;
+                    last_successful_server_port = port;
+                    
+                    log_info("Successfully got server IP: " + server_ipv4 + ":" + to_string(port));
+                    return {server_ipv4, port};
+                }
+            } catch (const exception& e) {
+                log_info("Failed to get server IP (attempt " + to_string(attempt) + "): " + string(e.what()));
+                if (attempt < max_retries) {
+                    log_info("Waiting " + to_string(delay_seconds) + " seconds before retry...");
+                    this_thread::sleep_for(chrono::seconds(delay_seconds));
+                }
+            }
         }
         
+        // 如果所有重试都失败，尝试使用上次成功的IP和端口
+        if (!last_successful_server_ip.empty() && last_successful_server_port > 0) {
+            log_info("All retries failed, using last successful server IP: " + 
+                    last_successful_server_ip + ":" + to_string(last_successful_server_port));
+            return {last_successful_server_ip, last_successful_server_port};
+        }
+        
+        log_info("Failed to get server IP after " + to_string(max_retries) + " attempts and no previous successful connection");
         return {"", 0};
+    }
+    
+    pair<string, int> get_server_ip() {
+        return get_server_ip_with_retry();
     }
     
     vector<int> get_cpu_usage() {
@@ -1504,7 +1541,8 @@ public:
         auto [server, port] = get_server_ip();
         
         if (server.empty() || port == 0) {
-            log_info("Failed to get server IP and port");
+            log_info("Failed to get server IP and port after all retries");
+            log_info("Program will exit. Please check network connection and server URL.");
             return;
         }
         
@@ -1535,6 +1573,20 @@ public:
                 ipv4 = old_ipv4;
                 ipv6 = old_ipv6;
                 log_info("IP address update failed, using cached values");
+            }
+            
+            // 定期尝试更新服务器IP和端口信息
+            log_info("Checking for server IP updates...");
+            auto [new_server, new_port] = get_server_ip_with_retry(3, 30); // 3次重试，间隔30秒
+            if (!new_server.empty() && new_port > 0) {
+                if (new_server != server_ip || new_port != server_port) {
+                    log_info("Server IP/Port changed from " + server_ip + ":" + to_string(server_port) + 
+                            " to " + new_server + ":" + to_string(new_port));
+                    server_ip = new_server;
+                    server_port = new_port;
+                }
+            } else {
+                log_info("Failed to update server IP, keeping current: " + server_ip + ":" + to_string(server_port));
             }
         }
         
