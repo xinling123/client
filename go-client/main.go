@@ -30,7 +30,7 @@ const (
 	PROBE_PROTOCOL_PREFER    = "ipv4"
 	PING_PACKET_HISTORY_LEN  = 100
 	INTERVAL                 = 1
-	LOG_FILE_PATH           = "/var/log/server_watch.log"
+	LOG_FILE_PATH           = "/root/server_watch.log"
 	MAX_LOG_SIZE            = 20 * 1024 * 1024 // 20 MB
 	BACKUP_COUNT            = 5
 )
@@ -62,12 +62,14 @@ var (
 		"189":   0.0,
 		"10086": 0.0,
 	}
+	lostRateLock = sync.RWMutex{}
 	
 	pingTime = map[string]int64{
 		"10010": 0,
 		"189":   0,
 		"10086": 0,
 	}
+	pingTimeLock = sync.RWMutex{}
 	
 	netSpeed = struct {
 		NetRx  int64
@@ -113,19 +115,6 @@ func initLogger() {
 	logger = log.New(lumberjackLogger, "", log.LstdFlags)
 }
 
-// 格式化大小
-func formatSize(bytes uint64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
-}
 
 // 获取客户端IP信息
 func getClientIP() (priority, countryCode, emoji, ipv4, ipv6 string) {
@@ -150,8 +139,11 @@ func getClientIP() (priority, countryCode, emoji, ipv4, ipv6 string) {
 			if cc, ok := result["country_code"].(string); ok {
 				countryCode = cc
 			}
-			if flag, ok := result["flag"].(string); ok {
-				emoji = flag
+			if flagObj, ok := result["flag"].(map[string]interface{}); ok {
+				// 将整个flag对象转换为JSON字符串保存
+				if flagJSON, err := json.Marshal(flagObj); err == nil {
+					emoji = string(flagJSON)
+				}
 			}
 		}
 	}
@@ -361,9 +353,6 @@ func getDisk() (total, used uint64) {
 			continue
 		}
 		
-		logger.Printf("Including disk: %s (%s) - Total: %s, Used: %s", 
-			partition.Mountpoint, partition.Device, formatSize(usage.Total), formatSize(usage.Used))
-		
 		processedMountpoints[partition.Mountpoint] = true
 		total += usage.Total
 		used += usage.Used
@@ -473,7 +462,9 @@ func pingThread(mark string, wg *sync.WaitGroup) {
 		
 		if err == nil {
 			conn.Close()
+			pingTimeLock.Lock()
 			pingTime[mark] = duration.Milliseconds()
+			pingTimeLock.Unlock()
 			packetHistory = append(packetHistory, 1)
 		} else {
 			lostPacket++
@@ -481,7 +472,9 @@ func pingThread(mark string, wg *sync.WaitGroup) {
 		}
 		
 		if len(packetHistory) > 30 {
+			lostRateLock.Lock()
 			lostRate[mark] = float64(lostPacket) / float64(len(packetHistory))
+			lostRateLock.Unlock()
 		}
 		
 		time.Sleep(2 * time.Second)
@@ -628,7 +621,7 @@ func dockerMonitor() {
 					}
 					
 					containerData["cpu_usage"] = fmt.Sprintf("%.2f%%", cpuPercent)
-					containerData["memory_usage"] = formatSize(statsData.MemoryStats.Usage)
+					containerData["memory_usage"] = statsData.MemoryStats.Usage
 					
 					// 计算网络速度
 					var currentRxBytes, currentTxBytes uint64
@@ -650,19 +643,19 @@ func dockerMonitor() {
 									if timeDiff > 0 {
 										rxSpeed := (currentRxBytes - lastRx) / uint64(timeDiff)
 										txSpeed := (currentTxBytes - lastTx) / uint64(timeDiff)
-										containerData["rx_speed"] = formatSize(rxSpeed) + "/s"
-										containerData["tx_speed"] = formatSize(txSpeed) + "/s"
+										containerData["rx_speed"] = rxSpeed
+										containerData["tx_speed"] = txSpeed
 									} else {
-										containerData["rx_speed"] = "0 B/s"
-										containerData["tx_speed"] = "0 B/s"
+										containerData["rx_speed"] = uint64(0)
+										containerData["tx_speed"] = uint64(0)
 									}
 								}
 							}
 						}
 					} else {
 						// 第一次收集数据，速度为0
-						containerData["rx_speed"] = "0 B/s"
-						containerData["tx_speed"] = "0 B/s"
+						containerData["rx_speed"] = uint64(0)
+						containerData["tx_speed"] = uint64(0)
 					}
 					
 					// 更新历史数据
@@ -896,14 +889,14 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 						"system_version": systemVersion,
 						"cpu_model":     cpuModel,
 						"cpu_usage":     cpuUsage,
-						"disk_total_size": formatSize(diskTotal),
-						"disk_used_size":  formatSize(diskUsed),
-						"memory_total_size": formatSize(memoryTotal),
-						"memory_used_size":  formatSize(memoryUsed),
-						"swap_total_size":   formatSize(swapTotal),
-						"swap_used_size":    formatSize(swapUsed),
-						"network_upload_size": formatSize(networkOut),
-						"network_download_size": formatSize(networkIn),
+						"disk_total_size": diskTotal,
+						"disk_used_size":  diskUsed,
+						"memory_total_size": memoryTotal,
+						"memory_used_size":  memoryUsed,
+						"swap_total_size":   swapTotal,
+						"swap_used_size":    swapUsed,
+						"network_upload_size": networkOut,
+						"network_download_size": networkIn,
 						"load_averages": fmt.Sprintf("%.2f,%.2f,%.2f", loadAvg[0], loadAvg[1], loadAvg[2]),
 						"tcp":     tcp,
 						"udp":     udp,
@@ -913,14 +906,14 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 					
 					// 添加网络速度
 					netSpeed.mu.RLock()
-					data["network_rx"] = formatSize(uint64(netSpeed.NetRx))
-					data["network_tx"] = formatSize(uint64(netSpeed.NetTx))
+					data["network_rx"] = uint64(netSpeed.NetRx)
+					data["network_tx"] = uint64(netSpeed.NetTx)
 					netSpeed.mu.RUnlock()
 					
 					// 添加磁盘IO
 					diskIO.mu.RLock()
-					data["io_read"] = formatSize(diskIO.Read)
-					data["io_write"] = formatSize(diskIO.Write)
+					data["io_read"] = diskIO.Read
+					data["io_write"] = diskIO.Write
 					diskIO.mu.RUnlock()
 					
 					// 添加ping数据
@@ -930,12 +923,17 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 					data["name_10086"] = pingConfigs["10086"].Name
 					pingConfigLock.RUnlock()
 					
+					lostRateLock.RLock()
 					data["ping_10010"] = lostRate["10010"] * 100
 					data["ping_189"] = lostRate["189"] * 100
 					data["ping_10086"] = lostRate["10086"] * 100
+					lostRateLock.RUnlock()
+					
+					pingTimeLock.RLock()
 					data["time_10010"] = pingTime["10010"]
 					data["time_189"] = pingTime["189"]
 					data["time_10086"] = pingTime["10086"]
+					pingTimeLock.RUnlock()
 					
 					// 添加Docker数据
 					dockerMutex.RLock()
@@ -950,6 +948,7 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 					}
 					
 					message := fmt.Sprintf("update:%s`", string(jsonData))
+					// logger.Printf("send data: %s", message)
 					_, err = conn.Write([]byte(message))
 					if err != nil {
 						logger.Printf("Failed to send data: %v", err)
