@@ -571,117 +571,141 @@ func checkDockerInstalled() bool {
 }
 
 // Docker监控
+// 说明：不使用缓存。对每个容器并行抓取统计数据，抓取到单个容器的数据后立即更新到全局
+// dockerStats 中，这样发送逻辑可以在固定时间点发送当前已有的数据（未完成的仍为旧数据）。
 func dockerMonitor() {
 	for {
 		if !checkDockerInstalled() {
 			time.Sleep(30 * time.Second)
 			continue
 		}
-		
+
 		cli, err := client.NewClientWithOpts(client.FromEnv)
 		if err != nil {
 			time.Sleep(30 * time.Second)
 			continue
 		}
-		
+
 		containers, err := cli.ContainerList(context.Background(), types.ContainerListOptions{All: true})
 		if err != nil {
 			cli.Close()
 			time.Sleep(30 * time.Second)
 			continue
 		}
-		
-		dockerMutex.Lock()
-		dockerStats = make(map[string]map[string]interface{})
-		
+
+		// 为每个容器并行获取数据，完成后立即写回到全局 dockerStats
 		for _, container := range containers {
-			containerData := make(map[string]interface{})
-			containerData["name"] = strings.TrimPrefix(container.Names[0], "/")
-			containerData["status"] = container.State
-			
-			if container.State == "running" {
-				// 获取容器统计信息
-				stats, err := cli.ContainerStats(context.Background(), container.ID, false)
-				if err == nil {
-					var statsData types.StatsJSON
-					json.NewDecoder(stats.Body).Decode(&statsData)
-					stats.Body.Close()
-					
-					// CPU使用率计算
-					cpuDelta := float64(statsData.CPUStats.CPUUsage.TotalUsage - statsData.PreCPUStats.CPUUsage.TotalUsage)
-					systemDelta := float64(statsData.CPUStats.SystemUsage - statsData.PreCPUStats.SystemUsage)
-					onlineCPUs := float64(statsData.CPUStats.OnlineCPUs)
-					if onlineCPUs == 0 {
-						onlineCPUs = 1
-					}
-					
-					var cpuPercent float64
-					if systemDelta > 0 && cpuDelta > 0 {
-						cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
-					}
-					
-					containerData["cpu_usage"] = fmt.Sprintf("%.2f%%", cpuPercent)
-					containerData["memory_usage"] = statsData.MemoryStats.Usage
-					
-					// 计算网络速度
-					var currentRxBytes, currentTxBytes uint64
-					for _, network := range statsData.Networks {
-						currentRxBytes += network.RxBytes
-						currentTxBytes += network.TxBytes
-					}
-					
-					currentTime := time.Now().Unix()
-					containerName := strings.TrimPrefix(container.Names[0], "/")
-					
-					// 获取历史数据来计算速度
-					dockerNetworkMutex.Lock()
-					if history, exists := dockerNetworkHistory[containerName]; exists {
-						if lastTime, ok := history["time"].(int64); ok {
-							if lastRx, ok := history["rx_bytes"].(uint64); ok {
-								if lastTx, ok := history["tx_bytes"].(uint64); ok {
-									timeDiff := currentTime - lastTime
-									if timeDiff > 0 {
-										rxSpeed := (currentRxBytes - lastRx) / uint64(timeDiff)
-										txSpeed := (currentTxBytes - lastTx) / uint64(timeDiff)
-										containerData["rx_speed"] = rxSpeed
-										containerData["tx_speed"] = txSpeed
-									} else {
-										containerData["rx_speed"] = uint64(0)
-										containerData["tx_speed"] = uint64(0)
+			go func(container types.Container) {
+				containerData := make(map[string]interface{})
+				containerName := strings.TrimPrefix(container.Names[0], "/")
+				containerData["name"] = containerName
+				containerData["status"] = container.State
+
+				if container.State == "running" {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+
+					stats, err := cli.ContainerStats(ctx, container.ID, false)
+					if err == nil {
+						// 确保 Body 最终会被关闭
+						if stats.Body != nil {
+							defer stats.Body.Close()
+						}
+						var statsData types.StatsJSON
+						decoder := json.NewDecoder(stats.Body)
+						decoder.DisallowUnknownFields()
+						if err := decoder.Decode(&statsData); err == nil {
+
+							// CPU使用率计算
+							cpuDelta := float64(statsData.CPUStats.CPUUsage.TotalUsage - statsData.PreCPUStats.CPUUsage.TotalUsage)
+							systemDelta := float64(statsData.CPUStats.SystemUsage - statsData.PreCPUStats.SystemUsage)
+							onlineCPUs := float64(statsData.CPUStats.OnlineCPUs)
+							if onlineCPUs == 0 {
+								onlineCPUs = 1
+							}
+
+							var cpuPercent float64
+							if systemDelta > 0 && cpuDelta > 0 {
+								cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
+							}
+
+							containerData["cpu_usage"] = fmt.Sprintf("%.2f%%", cpuPercent)
+							containerData["memory_usage"] = statsData.MemoryStats.Usage
+
+							// 计算网络速度
+							var currentRxBytes, currentTxBytes uint64
+							for _, network := range statsData.Networks {
+								currentRxBytes += network.RxBytes
+								currentTxBytes += network.TxBytes
+							}
+
+							currentTime := time.Now().Unix()
+
+							// 获取历史数据来计算速度
+							dockerNetworkMutex.Lock()
+							if history, exists := dockerNetworkHistory[containerName]; exists {
+								if lastTime, ok := history["time"].(int64); ok {
+									if lastRx, ok := history["rx_bytes"].(uint64); ok {
+										if lastTx, ok := history["tx_bytes"].(uint64); ok {
+											timeDiff := currentTime - lastTime
+											if timeDiff > 0 {
+												rxSpeed := (currentRxBytes - lastRx) / uint64(timeDiff)
+												txSpeed := (currentTxBytes - lastTx) / uint64(timeDiff)
+												containerData["rx_speed"] = rxSpeed
+												containerData["tx_speed"] = txSpeed
+											} else {
+												containerData["rx_speed"] = uint64(0)
+												containerData["tx_speed"] = uint64(0)
+											}
+										}
 									}
 								}
+							} else {
+								containerData["rx_speed"] = uint64(0)
+								containerData["tx_speed"] = uint64(0)
 							}
+
+							// 更新历史数据
+							dockerNetworkHistory[containerName] = map[string]interface{}{
+								"time":     currentTime,
+								"rx_bytes": currentRxBytes,
+								"tx_bytes": currentTxBytes,
+							}
+							dockerNetworkMutex.Unlock()
+						} else {
+							// 解析失败
+							containerData["cpu_usage"] = "null"
+							containerData["memory_usage"] = "null"
+							containerData["rx_speed"] = "null"
+							containerData["tx_speed"] = "null"
 						}
 					} else {
-						// 第一次收集数据，速度为0
-						containerData["rx_speed"] = uint64(0)
-						containerData["tx_speed"] = uint64(0)
+						// stats 请求失败
+						containerData["cpu_usage"] = "null"
+						containerData["memory_usage"] = "null"
+						containerData["rx_speed"] = "null"
+						containerData["tx_speed"] = "null"
 					}
-					
-					// 更新历史数据
-					dockerNetworkHistory[containerName] = map[string]interface{}{
-						"time":     currentTime,
-						"rx_bytes": currentRxBytes,
-						"tx_bytes": currentTxBytes,
-					}
-					dockerNetworkMutex.Unlock()
 				} else {
+					// 非运行状态
 					containerData["cpu_usage"] = "null"
 					containerData["memory_usage"] = "null"
 					containerData["rx_speed"] = "null"
 					containerData["tx_speed"] = "null"
 				}
-			} else {
-				containerData["cpu_usage"] = "null"
-				containerData["memory_usage"] = "null"
-				containerData["rx_speed"] = "null"
-				containerData["tx_speed"] = "null"
-			}
-			
-			dockerStats[containerData["name"].(string)] = containerData
+
+				// 单独更新全局 dockerStats 中对应容器的数据（立即生效），以便发送线程按固定周期发送已有的数据
+				dockerMutex.Lock()
+				if dockerStats == nil {
+					dockerStats = make(map[string]map[string]interface{})
+				}
+				dockerStats[containerName] = containerData
+				dockerMutex.Unlock()
+			}(container)
 		}
-		dockerMutex.Unlock()
-		
+
+		// 不等待所有容器完成：发送线程（monitorVPS）按固定周期读取 dockerStats，
+		// 若某个容器还未更新则会使用旧数据。
 		cli.Close()
 		time.Sleep(2 * time.Second)
 	}
@@ -743,7 +767,6 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 			defer conn.Close()
 			logger.Printf("Connected successfully to %s:%d", server, port)
 			
-			// Python代码中直接读取数据，不等待换行符
 			// 设置读取超时
 			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 			
@@ -935,10 +958,19 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 					data["time_10086"] = pingTime["10086"]
 					pingTimeLock.RUnlock()
 					
-					// 添加Docker数据
+					// 添加Docker数据：先复制一份快照，避免并发读写并允许部分数据发送
 					dockerMutex.RLock()
-					data["dockers"] = dockerStats
+					dockerSnapshot := make(map[string]map[string]interface{}, len(dockerStats))
+					for k, v := range dockerStats {
+						// 对每个容器的数据做浅拷贝，避免被并发修改
+						item := make(map[string]interface{}, len(v))
+						for ik, iv := range v {
+							item[ik] = iv
+						}
+						dockerSnapshot[k] = item
+					}
 					dockerMutex.RUnlock()
+					data["dockers"] = dockerSnapshot
 					
 					// 发送数据
 					jsonData, err := json.Marshal(data)
