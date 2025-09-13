@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -99,6 +101,12 @@ var (
 	// 全局监控线程管理
 	monitoringStarted = false
 	monitoringMutex   = sync.Mutex{}
+	
+	// 全局context用于优雅关闭
+	globalCtx, globalCancel = context.WithCancel(context.Background())
+	
+	// 用于等待所有goroutine结束
+	globalWaitGroup = sync.WaitGroup{}
 )
 
 // 清理旧的Docker网络历史数据，防止内存泄漏
@@ -119,35 +127,40 @@ func cleanupOldNetworkHistory() {
 }
 
 // 监控goroutine数量和内存使用情况
-func monitorGoroutines() {
+func monitorGoroutines(ctx context.Context) {
+	defer globalWaitGroup.Done()
+	
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	
-	for range ticker.C {
-		numGoroutines := runtime.NumGoroutine()
-		if numGoroutines > 1000 {
-			logger.Printf("WARNING: High goroutine count: %d", numGoroutines)
-		}
-		
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		
-		// 记录内存使用情况
-		allocMB := m.Alloc / 1024 / 1024
-		sysMB := m.Sys / 1024 / 1024
-		
-		if allocMB > 500 { // 如果分配的内存超过500MB，记录警告
-			logger.Printf("WARNING: High memory usage - Alloc=%d MB, Sys=%d MB, NumGC=%d, Goroutines=%d", 
-				allocMB, sysMB, m.NumGC, numGoroutines)
-		} else {
-			// logger.Printf("Resource status - Memory: Alloc=%d MB, Sys=%d MB, NumGC=%d, Goroutines=%d", 
-			// 	allocMB, sysMB, m.NumGC, numGoroutines)
-		}
-		
-		// 如果内存使用过高，强制进行垃圾回收
-		if allocMB > 1000 {
-			logger.Println("Force garbage collection due to high memory usage")
-			runtime.GC()
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Println("Goroutine monitor stopping...")
+			return
+		case <-ticker.C:
+			numGoroutines := runtime.NumGoroutine()
+			if numGoroutines > 1000 {
+				logger.Printf("WARNING: High goroutine count: %d", numGoroutines)
+			}
+			
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			
+			// 记录内存使用情况
+			allocMB := m.Alloc / 1024 / 1024
+			sysMB := m.Sys / 1024 / 1024
+			
+			if allocMB > 500 { // 如果分配的内存超过500MB，记录警告
+				logger.Printf("WARNING: High memory usage - Alloc=%d MB, Sys=%d MB, NumGC=%d, Goroutines=%d", 
+					allocMB, sysMB, m.NumGC, numGoroutines)
+			}
+			
+			// 如果内存使用过高，强制进行垃圾回收
+			if allocMB > 1000 {
+				logger.Println("Force garbage collection due to high memory usage")
+				runtime.GC()
+			}
 		}
 	}
 }
@@ -481,135 +494,159 @@ func getLoadAverage() [3]float64 {
 }
 
 // Ping线程
-func pingThread(mark string, wg *sync.WaitGroup) {
-	defer wg.Done()
+func pingThread(ctx context.Context, mark string) {
+	defer globalWaitGroup.Done()
 	
 	lostPacket := 0
 	packetHistory := make([]int, 0, PING_PACKET_HISTORY_LEN)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 	
 	for {
-		pingConfigLock.RLock()
-		config := pingConfigs[mark]
-		host := config.Host
-		port := config.Port
-		pingConfigLock.RUnlock()
-		
-		// 解析IP地址
-		ip := host
-		if !strings.Contains(host, ":") { // 不是IPv6地址
-			addrs, err := net.LookupHost(host)
-			if err == nil && len(addrs) > 0 {
-				ip = addrs[0]
+		select {
+		case <-ctx.Done():
+			logger.Printf("Ping thread for %s stopping...", mark)
+			return
+		case <-ticker.C:
+			pingConfigLock.RLock()
+			config := pingConfigs[mark]
+			host := config.Host
+			port := config.Port
+			pingConfigLock.RUnlock()
+			
+			// 解析IP地址
+			ip := host
+			if !strings.Contains(host, ":") { // 不是IPv6地址
+				addrs, err := net.LookupHost(host)
+				if err == nil && len(addrs) > 0 {
+					ip = addrs[0]
+				}
+			}
+			
+			// 测试连接
+			start := time.Now()
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), time.Second)
+			duration := time.Since(start)
+			
+			if len(packetHistory) >= PING_PACKET_HISTORY_LEN {
+				if packetHistory[0] == 0 {
+					lostPacket--
+				}
+				packetHistory = packetHistory[1:]
+			}
+			
+			if err == nil {
+				conn.Close()
+				pingTimeLock.Lock()
+				pingTime[mark] = duration.Milliseconds()
+				pingTimeLock.Unlock()
+				packetHistory = append(packetHistory, 1)
+			} else {
+				lostPacket++
+				packetHistory = append(packetHistory, 0)
+			}
+			
+			if len(packetHistory) > 30 {
+				lostRateLock.Lock()
+				lostRate[mark] = float64(lostPacket) / float64(len(packetHistory))
+				lostRateLock.Unlock()
 			}
 		}
-		
-		// 测试连接
-		start := time.Now()
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), time.Second)
-		duration := time.Since(start)
-		
-		if len(packetHistory) >= PING_PACKET_HISTORY_LEN {
-			if packetHistory[0] == 0 {
-				lostPacket--
-			}
-			packetHistory = packetHistory[1:]
-		}
-		
-		if err == nil {
-			conn.Close()
-			pingTimeLock.Lock()
-			pingTime[mark] = duration.Milliseconds()
-			pingTimeLock.Unlock()
-			packetHistory = append(packetHistory, 1)
-		} else {
-			lostPacket++
-			packetHistory = append(packetHistory, 0)
-		}
-		
-		if len(packetHistory) > 30 {
-			lostRateLock.Lock()
-			lostRate[mark] = float64(lostPacket) / float64(len(packetHistory))
-			lostRateLock.Unlock()
-		}
-		
-		time.Sleep(2 * time.Second)
 	}
 }
 
 // 网络速度监控
-func netSpeedMonitor() {
+func netSpeedMonitor(ctx context.Context) {
+	defer globalWaitGroup.Done()
+	
+	ticker := time.NewTicker(time.Duration(INTERVAL) * time.Second)
+	defer ticker.Stop()
+	
 	for {
-		stats, err := psnet.IOCounters(true)
-		if err != nil {
-			time.Sleep(time.Duration(INTERVAL) * time.Second)
-			continue
-		}
-		
-		var avgRx, avgTx uint64
-		for _, stat := range stats {
-			name := stat.Name
-			if strings.Contains(name, "lo") || strings.Contains(name, "tun") ||
-				strings.Contains(name, "docker") || strings.Contains(name, "veth") ||
-				strings.Contains(name, "br-") || strings.Contains(name, "vmbr") ||
-				strings.Contains(name, "vnet") || strings.Contains(name, "kube") {
+		select {
+		case <-ctx.Done():
+			logger.Println("Network speed monitor stopping...")
+			return
+		case <-ticker.C:
+			stats, err := psnet.IOCounters(true)
+			if err != nil {
 				continue
 			}
-			avgRx += stat.BytesRecv
-			avgTx += stat.BytesSent
+			
+			var avgRx, avgTx uint64
+			for _, stat := range stats {
+				name := stat.Name
+				if strings.Contains(name, "lo") || strings.Contains(name, "tun") ||
+					strings.Contains(name, "docker") || strings.Contains(name, "veth") ||
+					strings.Contains(name, "br-") || strings.Contains(name, "vmbr") ||
+					strings.Contains(name, "vnet") || strings.Contains(name, "kube") {
+					continue
+				}
+				avgRx += stat.BytesRecv
+				avgTx += stat.BytesSent
+			}
+			
+			nowClock := float64(time.Now().Unix())
+			
+			netSpeed.mu.Lock()
+			netSpeed.Diff = nowClock - netSpeed.Clock
+			netSpeed.Clock = nowClock
+			if netSpeed.Diff > 0 {
+				netSpeed.NetRx = int64((float64(avgRx) - float64(netSpeed.AvgRx)) / netSpeed.Diff)
+				netSpeed.NetTx = int64((float64(avgTx) - float64(netSpeed.AvgTx)) / netSpeed.Diff)
+			}
+			netSpeed.AvgRx = int64(avgRx)
+			netSpeed.AvgTx = int64(avgTx)
+			netSpeed.mu.Unlock()
 		}
-		
-		nowClock := float64(time.Now().Unix())
-		
-		netSpeed.mu.Lock()
-		netSpeed.Diff = nowClock - netSpeed.Clock
-		netSpeed.Clock = nowClock
-		if netSpeed.Diff > 0 {
-			netSpeed.NetRx = int64((float64(avgRx) - float64(netSpeed.AvgRx)) / netSpeed.Diff)
-			netSpeed.NetTx = int64((float64(avgTx) - float64(netSpeed.AvgTx)) / netSpeed.Diff)
-		}
-		netSpeed.AvgRx = int64(avgRx)
-		netSpeed.AvgTx = int64(avgTx)
-		netSpeed.mu.Unlock()
-		
-		time.Sleep(time.Duration(INTERVAL) * time.Second)
 	}
 }
 
 // 磁盘IO监控
-func diskIOMonitor() {
+func diskIOMonitor(ctx context.Context) {
+	defer globalWaitGroup.Done()
+	
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		// macOS和Windows暂不处理磁盘IO
+		logger.Println("Disk IO monitoring not supported on this platform")
 		return
 	}
 	
+	ticker := time.NewTicker(time.Duration(INTERVAL) * time.Second)
+	defer ticker.Stop()
+	
+	var before map[string]disk.IOCountersStat
+	
 	for {
-		before, err := disk.IOCounters()
-		if err != nil {
-			time.Sleep(time.Duration(INTERVAL) * time.Second)
-			continue
-		}
-		
-		time.Sleep(time.Duration(INTERVAL) * time.Second)
-		
-		after, err := disk.IOCounters()
-		if err != nil {
-			continue
-		}
-		
-		var totalRead, totalWrite uint64
-		for device := range before {
-			if afterStat, ok := after[device]; ok {
-				if beforeStat, ok := before[device]; ok {
-					totalRead += afterStat.ReadBytes - beforeStat.ReadBytes
-					totalWrite += afterStat.WriteBytes - beforeStat.WriteBytes
-				}
+		select {
+		case <-ctx.Done():
+			logger.Println("Disk IO monitor stopping...")
+			return
+		case <-ticker.C:
+			after, err := disk.IOCounters()
+			if err != nil {
+				continue
 			}
+			
+			if before != nil {
+				var totalRead, totalWrite uint64
+				for device := range before {
+					if afterStat, ok := after[device]; ok {
+						if beforeStat, ok := before[device]; ok {
+							totalRead += afterStat.ReadBytes - beforeStat.ReadBytes
+							totalWrite += afterStat.WriteBytes - beforeStat.WriteBytes
+						}
+					}
+				}
+				
+				diskIO.mu.Lock()
+				diskIO.Read = totalRead
+				diskIO.Write = totalWrite
+				diskIO.mu.Unlock()
+			}
+			
+			before = after
 		}
-		
-		diskIO.mu.Lock()
-		diskIO.Read = totalRead
-		diskIO.Write = totalWrite
-		diskIO.mu.Unlock()
 	}
 }
 
@@ -626,44 +663,58 @@ func checkDockerInstalled() bool {
 }
 
 // Docker监控 - 持续收集容器数据，每个容器完成后立即更新到缓冲区
-func dockerMonitor() {
+func dockerMonitor(ctx context.Context) {
+	defer globalWaitGroup.Done()
+	
 	// 创建一个用于清理历史数据的ticker
 	cleanupTicker := time.NewTicker(5 * time.Minute)
 	defer cleanupTicker.Stop()
+	
+	// 容器监控ticker
+	containerTicker := time.NewTicker(3 * time.Second)
+	defer containerTicker.Stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			logger.Println("Docker monitor stopping...")
+			return
 		case <-cleanupTicker.C:
 			// 定期清理旧的网络历史数据
 			cleanupOldNetworkHistory()
-		default:
+		case <-containerTicker.C:
 			if !checkDockerInstalled() {
-				time.Sleep(30 * time.Second)
 				continue
 			}
 
 			cli, err := client.NewClientWithOpts(client.FromEnv)
 			if err != nil {
-				time.Sleep(30 * time.Second)
 				continue
 			}
 
-			containers, err := cli.ContainerList(context.Background(), types.ContainerListOptions{All: true})
+			containers, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true})
 			if err != nil {
 				cli.Close()
-				time.Sleep(30 * time.Second)
 				continue
 			}
 
 			// 使用信号量限制并发goroutine数量
 			semaphore := make(chan struct{}, 10) // 最多同时处理10个容器
+			var containerWg sync.WaitGroup
 
 			// 为每个容器启动独立的goroutine，完成后立即更新缓冲区
 			for _, container := range containers {
+				containerWg.Add(1)
 				go func(container types.Container) {
+					defer containerWg.Done()
+					
 					// 获取信号量
-					semaphore <- struct{}{}
-					defer func() { <-semaphore }() // 释放信号量
+					select {
+					case semaphore <- struct{}{}:
+						defer func() { <-semaphore }() // 释放信号量
+					case <-ctx.Done():
+						return // 如果context已取消，直接返回
+					}
 
 					containerName := strings.TrimPrefix(container.Names[0], "/")
 					containerData := collectSingleContainerData(cli, container, containerName)
@@ -675,14 +726,26 @@ func dockerMonitor() {
 					}
 					dockerStats[containerName] = containerData
 					dockerMutex.Unlock()
-					
-					// 可选：记录更新日志
-					// logger.Printf("Updated container data: %s", containerName)
 				}(container)
 			}
 
+			// 等待所有容器goroutine完成，但也要监听context取消
+			done := make(chan struct{})
+			go func() {
+				containerWg.Wait()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// 所有容器处理完成
+			case <-ctx.Done():
+				// context已取消，不等待容器处理完成
+				cli.Close()
+				return
+			}
+
 			cli.Close()
-			time.Sleep(3 * time.Second) // 每3秒检查一次容器列表
 		}
 	}
 }
@@ -800,7 +863,7 @@ func updatePingTarget(mark, newHost string, newPort int, newName string) {
 }
 
 // 启动实时数据收集
-func startRealtimeDataCollection() {
+func startRealtimeDataCollection(ctx context.Context) {
 	monitoringMutex.Lock()
 	defer monitoringMutex.Unlock()
 	
@@ -812,23 +875,26 @@ func startRealtimeDataCollection() {
 	logger.Println("Starting monitoring threads...")
 	
 	// 启动ping线程
-	var wg sync.WaitGroup
 	for mark := range pingConfigs {
-		wg.Add(1)
-		go pingThread(mark, &wg)
+		globalWaitGroup.Add(1)
+		go pingThread(ctx, mark)
 	}
 	
 	// 启动网络速度监控
-	go netSpeedMonitor()
+	globalWaitGroup.Add(1)
+	go netSpeedMonitor(ctx)
 	
 	// 启动磁盘IO监控
-	go diskIOMonitor()
+	globalWaitGroup.Add(1)
+	go diskIOMonitor(ctx)
 	
 	// 启动Docker监控
-	go dockerMonitor()
+	globalWaitGroup.Add(1)
+	go dockerMonitor(ctx)
 	
 	// 启动资源监控
-	go monitorGoroutines()
+	globalWaitGroup.Add(1)
+	go monitorGoroutines(ctx)
 	
 	monitoringStarted = true
 	logger.Println("All monitoring threads started successfully")
@@ -964,7 +1030,7 @@ func monitorVPS(config ClientConfig, priority, countryCode, emoji, ipv4, ipv6, s
 				
 				if !threadingStart {
 					logger.Println("Starting monitoring threads...")
-					startRealtimeDataCollection()
+					startRealtimeDataCollection(globalCtx)
 					threadingStart = true
 				}
 			}
@@ -1121,6 +1187,10 @@ func main() {
 	initLogger()
 	logger.Println("Server Monitor Client Starting...")
 	
+	// 设置信号处理
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
 	// 解析命令行参数
 	config := ClientConfig{}
 	for _, arg := range os.Args[1:] {
@@ -1151,15 +1221,48 @@ func main() {
 	// 启动主监控循环
 	go monitorVPS(config, priority, countryCode, emoji, ipv4, ipv6, server, port)
 	
-	// 定期更新IP信息
-	for {
-		time.Sleep(6 * time.Hour)
-		newPriority, newCountryCode, newEmoji, newIPv4, newIPv6 := getClientIP()
-		if newIPv4 != "" || newIPv6 != "" || newPriority != "" {
-			priority, countryCode, emoji, ipv4, ipv6 = newPriority, newCountryCode, newEmoji, newIPv4, newIPv6
-			logger.Println("IP address updated successfully")
-		} else {
-			logger.Println("Failed to update IP address")
+	// 启动IP更新goroutine
+	go func() {
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-globalCtx.Done():
+				logger.Println("IP update goroutine stopping...")
+				return
+			case <-ticker.C:
+				newPriority, newCountryCode, newEmoji, newIPv4, newIPv6 := getClientIP()
+				if newIPv4 != "" || newIPv6 != "" || newPriority != "" {
+					priority, countryCode, emoji, ipv4, ipv6 = newPriority, newCountryCode, newEmoji, newIPv4, newIPv6
+					logger.Println("IP address updated successfully")
+				} else {
+					logger.Println("Failed to update IP address")
+				}
+			}
 		}
+	}()
+	
+	// 等待信号
+	<-sigChan
+	logger.Println("Received shutdown signal, starting graceful shutdown...")
+	
+	// 取消所有goroutine
+	globalCancel()
+	
+	// 等待所有goroutine结束，最多等待30秒
+	done := make(chan struct{})
+	go func() {
+		globalWaitGroup.Wait()
+		close(done)
+	}()
+	
+	select {
+	case <-done:
+		logger.Println("All goroutines stopped gracefully")
+	case <-time.After(30 * time.Second):
+		logger.Println("Timeout waiting for goroutines to stop, forcing exit")
 	}
+	
+	logger.Println("Server Monitor Client stopped")
 }
