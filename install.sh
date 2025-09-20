@@ -28,18 +28,18 @@ fi
 echo "创建 systemd 服务"
 
 # 使用 curl 获取 IP 地址（静默模式）
-# ip=$(curl -s test.ipw.cn)
-# if [ -z "$ip" ]; then
-#     echo "错误：无法获取 IP 地址。" >&2
-#     exit 1
-# fi
+ip=$(curl -s ifconfig.co)
+if [ -z "$ip" ]; then
+    echo "错误：无法获取 IP 地址。" >&2
+    exit 1
+fi
 
-# if [[ "$ip" == *:* ]]; then
-#     echo "IPv6"
-#     wget -O client --no-check-certificate --inet6-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" >/dev/null 2>&1 && chmod +x client
-# else
-wget -O client --no-check-certificate --inet4-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" >/dev/null 2>&1 && chmod +x client
-# fi
+if [[ "$ip" == *:* ]]; then
+    echo "IPv6"
+    wget -O client --no-check-certificate --inet6-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" >/dev/null 2>&1 && chmod +x client
+else
+    wget -O client --no-check-certificate --inet4-only "https://raw.githubusercontent.com/xinling123/client/refs/heads/main/client" >/dev/null 2>&1 && chmod +x client
+fi
 
 # 创建 systemd 服务单元文件
 bash -c "cat > $SERVICE_PATH" <<EOL
