@@ -190,73 +190,91 @@ func getClientIP() (priority, countryCode, emoji, ipv4, ipv6 string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	
 	// 获取优先IP
-	resp, err := client.Post("https://4.ipw.cn", "application/json", nil)
-	if err == nil {
+	resp, err := client.Get("https://ifconfig.co")
+	if err != nil {
+		logger.Printf("Failed to get priority IP: %v", err)
+	} else {
 		defer resp.Body.Close()
-		buf := make([]byte, 1024)
-		n, _ := resp.Body.Read(buf)
-		priority = strings.TrimSpace(string(buf[:n]))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logger.Printf("Failed to read priority IP response: %v", err)
+		} else {
+			priority = strings.TrimSpace(string(body))
+		}
 	}
-	
+
 	// 获取国家信息
 	if priority != "" {
 		resp, err := client.Get(fmt.Sprintf("http://ipwho.is/%s", priority))
-		if err == nil {
+		if err != nil {
+			logger.Printf("Failed to get country info: %v", err)
+		} else {
 			defer resp.Body.Close()
 			var result map[string]interface{}
-			json.NewDecoder(resp.Body).Decode(&result)
-			if cc, ok := result["country_code"].(string); ok {
-				countryCode = cc
-			}
-			if flagObj, ok := result["flag"].(map[string]interface{}); ok {
-				// 将整个flag对象转换为JSON字符串保存
-				if flagJSON, err := json.Marshal(flagObj); err == nil {
-					emoji = string(flagJSON)
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				logger.Printf("Failed to decode country info: %v", err)
+			} else {
+				if cc, ok := result["country_code"].(string); ok {
+					countryCode = cc
+				}
+				if flagObj, ok := result["flag"].(map[string]interface{}); ok {
+					// 将整个flag对象转换为JSON字符串保存
+					if flagJSON, err := json.Marshal(flagObj); err != nil {
+						logger.Printf("Failed to marshal flag object: %v", err)
+					} else {
+						emoji = string(flagJSON)
+					}
 				}
 			}
 		}
 	}
 	
-	// 获取IPv4 - 先尝试HTTPS，失败则尝试HTTP
-	resp, err = client.Get("https://4.ipw.cn")
-	if err != nil {
-		// HTTPS失败，尝试HTTP
-		logger.Printf("HTTPS failed for IPv4, trying HTTP: %v", err)
-		resp, err = client.Get("http://4.ipw.cn")
+	// 获取IPv4 - 创建专用的IPv4客户端
+	ipv4Client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				d := &net.Dialer{}
+				return d.DialContext(ctx, "tcp4", addr) // 强制 IPv4
+			},
+		},
 	}
-	if err == nil {
+	resp, err = ipv4Client.Get("https://ifconfig.co")
+	if err != nil {
+		logger.Printf("Failed to get IPv4 address: %v", err)
+	} else {
 		defer resp.Body.Close()
-		// 读取完整响应而不是只读1024字节
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr == nil {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logger.Printf("Failed to read IPv4 response: %v", err)
+		} else {
 			ipv4 = strings.TrimSpace(string(body))
-		} else {
-			logger.Printf("Failed to read IPv4 response body: %v", readErr)
 		}
-	} else {
-		logger.Printf("Failed to get IPv4: %v", err)
 	}
-	
-	// 获取IPv6 - 先尝试HTTPS，失败则尝试HTTP
-	resp, err = client.Get("https://6.ipw.cn")
+
+	// 获取IPv6 - 创建专用的IPv6客户端
+	ipv6Client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				d := &net.Dialer{}
+				return d.DialContext(ctx, "tcp6", addr) // 强制 IPv6
+			},
+		},
+	}
+	resp, err = ipv6Client.Get("https://ifconfig.co")
 	if err != nil {
-		// HTTPS失败，尝试HTTP
-		logger.Printf("HTTPS failed for IPv6, trying HTTP: %v", err)
-		resp, err = client.Get("http://6.ipw.cn")
-	}
-	if err == nil {
-		defer resp.Body.Close()
-		// 读取完整响应而不是只读1024字节
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr == nil {
-			ipv6 = strings.TrimSpace(string(body))
-		} else {
-			logger.Printf("Failed to read IPv6 response body: %v", readErr)
-		}
+		logger.Printf("Failed to get IPv6 address: %v", err)
 	} else {
-		logger.Printf("Failed to get IPv6: %v", err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logger.Printf("Failed to read IPv6 response: %v", err)
+		} else {
+			ipv6 = strings.TrimSpace(string(body))
+		}
 	}
-	
+
 	logger.Printf("IP Info: priority=%s, country=%s, emoji=%s, ipv4=%s, ipv6=%s", 
 		priority, countryCode, emoji, ipv4, ipv6)
 	
