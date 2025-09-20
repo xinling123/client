@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -189,7 +190,7 @@ func getClientIP() (priority, countryCode, emoji, ipv4, ipv6 string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	
 	// 获取优先IP
-	resp, err := client.Post("https://test.ipw.cn", "application/json", nil)
+	resp, err := client.Post("https://4.ipw.cn", "application/json", nil)
 	if err == nil {
 		defer resp.Body.Close()
 		buf := make([]byte, 1024)
@@ -216,22 +217,44 @@ func getClientIP() (priority, countryCode, emoji, ipv4, ipv6 string) {
 		}
 	}
 	
-	// 获取IPv4
-	resp, err = client.Get("https://4.ipw.cn/")
+	// 获取IPv4 - 先尝试HTTPS，失败则尝试HTTP
+	resp, err = client.Get("https://4.ipw.cn")
+	if err != nil {
+		// HTTPS失败，尝试HTTP
+		logger.Printf("HTTPS failed for IPv4, trying HTTP: %v", err)
+		resp, err = client.Get("http://4.ipw.cn")
+	}
 	if err == nil {
 		defer resp.Body.Close()
-		buf := make([]byte, 1024)
-		n, _ := resp.Body.Read(buf)
-		ipv4 = strings.TrimSpace(string(buf[:n]))
+		// 读取完整响应而不是只读1024字节
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			ipv4 = strings.TrimSpace(string(body))
+		} else {
+			logger.Printf("Failed to read IPv4 response body: %v", readErr)
+		}
+	} else {
+		logger.Printf("Failed to get IPv4: %v", err)
 	}
 	
-	// 获取IPv6
-	resp, err = client.Get("https://6.ipw.cn/")
+	// 获取IPv6 - 先尝试HTTPS，失败则尝试HTTP
+	resp, err = client.Get("https://6.ipw.cn")
+	if err != nil {
+		// HTTPS失败，尝试HTTP
+		logger.Printf("HTTPS failed for IPv6, trying HTTP: %v", err)
+		resp, err = client.Get("http://6.ipw.cn")
+	}
 	if err == nil {
 		defer resp.Body.Close()
-		buf := make([]byte, 1024)
-		n, _ := resp.Body.Read(buf)
-		ipv6 = strings.TrimSpace(string(buf[:n]))
+		// 读取完整响应而不是只读1024字节
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			ipv6 = strings.TrimSpace(string(body))
+		} else {
+			logger.Printf("Failed to read IPv6 response body: %v", readErr)
+		}
+	} else {
+		logger.Printf("Failed to get IPv6: %v", err)
 	}
 	
 	logger.Printf("IP Info: priority=%s, country=%s, emoji=%s, ipv4=%s, ipv6=%s", 
