@@ -739,6 +739,33 @@ func dockerMonitor(ctx context.Context) {
 				continue
 			}
 
+			// 收集当前存在的容器名称
+			currentContainers := make(map[string]bool)
+			for _, container := range containers {
+				containerName := strings.TrimPrefix(container.Names[0], "/")
+				currentContainers[containerName] = true
+			}
+
+			// 清理已删除容器的数据
+			dockerMutex.Lock()
+			for containerName := range dockerStats {
+				if !currentContainers[containerName] {
+					delete(dockerStats, containerName)
+					logger.Printf("Removed data for deleted container: %s", containerName)
+				}
+			}
+			dockerMutex.Unlock()
+
+			// 清理已删除容器的网络历史数据
+			dockerNetworkMutex.Lock()
+			for containerName := range dockerNetworkHistory {
+				if !currentContainers[containerName] {
+					delete(dockerNetworkHistory, containerName)
+					logger.Printf("Removed network history for deleted container: %s", containerName)
+				}
+			}
+			dockerNetworkMutex.Unlock()
+
 			// 使用信号量限制并发goroutine数量
 			semaphore := make(chan struct{}, 10) // 最多同时处理10个容器
 			var containerWg sync.WaitGroup
