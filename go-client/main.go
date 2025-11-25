@@ -693,14 +693,21 @@ func diskIOMonitor(ctx context.Context) {
 
 // 检查Docker是否安装
 func checkDockerInstalled() bool {
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
+		logger.Printf("Docker client creation failed: %v (check if DOCKER_HOST is set correctly)", err)
 		return false
 	}
 	defer cli.Close()
 	
-	_, err = cli.Ping(context.Background())
-	return err == nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = cli.Ping(ctx)
+	if err != nil {
+		logger.Printf("Docker ping failed: %v (check if Docker daemon is running and accessible)", err)
+		return false
+	}
+	return true
 }
 
 // Docker监控 - 持续收集容器数据，每个容器完成后立即更新到缓冲区
@@ -725,16 +732,19 @@ func dockerMonitor(ctx context.Context) {
 			cleanupOldNetworkHistory()
 		case <-containerTicker.C:
 			if !checkDockerInstalled() {
+				// 错误已在checkDockerInstalled中记录
 				continue
 			}
 
-			cli, err := client.NewClientWithOpts(client.FromEnv)
+			cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 			if err != nil {
+				logger.Printf("Failed to create Docker client: %v", err)
 				continue
 			}
 
 			containers, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true})
 			if err != nil {
+				logger.Printf("Failed to list Docker containers: %v (permission issue or Docker API problem)", err)
 				cli.Close()
 				continue
 			}
@@ -825,7 +835,7 @@ func collectSingleContainerData(cli *client.Client, container types.Container, c
 	containerData["status"] = container.State
 
 	if container.State == "running" {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		stats, err := cli.ContainerStats(ctx, container.ID, false)
@@ -834,7 +844,8 @@ func collectSingleContainerData(cli *client.Client, container types.Container, c
 			
 			var statsData types.StatsJSON
 			decoder := json.NewDecoder(stats.Body)
-			if err := decoder.Decode(&statsData); err == nil {
+			decodeErr := decoder.Decode(&statsData)
+			if decodeErr == nil {
 				// CPU使用率计算
 				cpuDelta := float64(statsData.CPUStats.CPUUsage.TotalUsage - statsData.PreCPUStats.CPUUsage.TotalUsage)
 				systemDelta := float64(statsData.CPUStats.SystemUsage - statsData.PreCPUStats.SystemUsage)
@@ -893,6 +904,7 @@ func collectSingleContainerData(cli *client.Client, container types.Container, c
 				dockerNetworkMutex.Unlock()
 			} else {
 				// 解析失败
+				logger.Printf("Failed to decode Docker stats for container %s: %v", containerName, decodeErr)
 				containerData["cpu_usage"] = "null"
 				containerData["memory_usage"] = "null"
 				containerData["rx_speed"] = "null"
@@ -900,6 +912,11 @@ func collectSingleContainerData(cli *client.Client, container types.Container, c
 			}
 		} else {
 			// stats 请求失败
+			if err != nil {
+				logger.Printf("Failed to get Docker stats for container %s: %v (timeout or permission issue)", containerName, err)
+			} else if stats.Body == nil {
+				logger.Printf("Docker stats body is nil for container %s", containerName)
+			}
 			containerData["cpu_usage"] = "null"
 			containerData["memory_usage"] = "null"
 			containerData["rx_speed"] = "null"
